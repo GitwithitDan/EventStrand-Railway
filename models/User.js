@@ -10,7 +10,7 @@ const userSchema = new mongoose.Schema({
   previousHandles: [{ type: String, lowercase: true }],
 }, { timestamps: true });
 
-userSchema.index({ handle: 1 });
+// handle index is declared via `unique: true` on the field above — no duplicate needed
 userSchema.index({ previousHandles: 1 });
 
 module.exports = mongoose.model('User', userSchema);
