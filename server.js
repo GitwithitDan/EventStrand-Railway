@@ -27,6 +27,15 @@ app.use(express.json({ limit: '2mb' }));
 app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false }));
 app.use('/api/', rateLimit({ windowMs: 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false }));
 
+// ── NO-CACHE HEADERS (prevents Cloudflare caching API responses) ─────────
+// QR endpoint is excluded — it intentionally sets its own long cache header
+app.use('/api', (req, res, next) => {
+  if (!req.path.startsWith('/qr')) {
+    res.set('Cache-Control', 'no-store');
+  }
+  next();
+});
+
 // ── ROUTES ────────────────────────────────────────────────────
 app.use('/api/auth',      require('./routes/auth'));
 app.use('/api/strands',   require('./routes/strands'));
