@@ -8,6 +8,8 @@ const auth     = require('../middleware/auth');
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
+const RESERVED_HANDLES = ['admin','api','app','eventstrand','www','support','help','static','assets','s','b','p','spec'];
+
 function signToken(userId) {
   return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: '90d' });
 }
@@ -80,9 +82,8 @@ router.post('/google', async (req, res, next) => {
     if (!user) {
       user = await User.create({ googleId, email, displayName: name, picture });
     } else {
-      // Update profile picture and name silently
-      user.googleId   = googleId;
-      user.picture    = picture || user.picture;
+      user.googleId    = googleId;
+      user.picture     = picture || user.picture;
       user.displayName = user.displayName || name;
       await user.save();
     }
@@ -110,8 +111,7 @@ router.get('/check-handle', async (req, res, next) => {
     if (!handle || !/^[a-zA-Z0-9_-]{3,30}$/.test(handle)) {
       return res.status(400).json({ error: 'Invalid handle format' });
     }
-    const reserved = ['admin','api','app','eventstrand','www','support','help','static','assets','s','b','p','spec'];
-    if (reserved.includes(handle.toLowerCase())) {
+    if (RESERVED_HANDLES.includes(handle.toLowerCase())) {
       return res.json({ available: false });
     }
     const exists = await User.findOne({ handle: handle.toLowerCase() });
@@ -129,16 +129,20 @@ router.post('/set-handle', auth, async (req, res, next) => {
       return res.status(400).json({ error: 'Invalid handle format' });
     }
     const lower = handle.toLowerCase();
+
+    // Apply the same reserved list check as check-handle
+    if (RESERVED_HANDLES.includes(lower)) {
+      return res.status(400).json({ error: 'That handle is reserved' });
+    }
+
     const taken = await User.findOne({ handle: lower, _id: { $ne: req.user._id } });
     if (taken) return res.status(409).json({ error: 'Handle already taken' });
 
-    // Store old handle for redirect
     const oldHandle = req.user.handle;
     if (oldHandle && oldHandle !== lower) {
       if (!req.user.previousHandles.includes(oldHandle)) {
         req.user.previousHandles.push(oldHandle);
       }
-      // Update publisherHandle on all strands and braids silently
       const Strand = require('../models/Strand');
       const Braid  = require('../models/Braid');
       await Strand.updateMany({ publisher: req.user._id }, { publisherHandle: lower });
