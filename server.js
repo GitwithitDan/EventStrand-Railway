@@ -6,6 +6,9 @@ const rateLimit = require('express-rate-limit');
 
 const app = express();
 
+// ── TRUST PROXY (required for correct IP detection behind Cloudflare + Railway) ──
+app.set('trust proxy', 1);
+
 // ── CORS ─────────────────────────────────────────────────────
 const allowedOrigins = [
   process.env.FRONTEND_URL || 'https://eventstrand.com',
