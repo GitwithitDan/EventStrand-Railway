@@ -16,10 +16,10 @@ router.get('/workspaces', auth, async (req, res, next) => {
     const workspaces = await Workspace.find({ user: req.user._id }).sort({ createdAt: 1 });
     res.json({
       workspaces: workspaces.map(ws => ({
-        _id:        ws._id,
-        name:       ws.name,
-        icon:       ws.icon,
-        isActive:   ws.isActive,
+        _id:         ws._id,
+        name:        ws.name,
+        icon:        ws.icon,
+        isActive:    ws.isActive,
         strandCount: ws.strands.length,
         braidCount:  ws.braids.length,
       })),
@@ -40,7 +40,7 @@ router.post('/workspaces', auth, async (req, res, next) => {
       user:     req.user._id,
       name:     name.trim().slice(0, 50),
       icon:     icon || '🌅',
-      isActive: count === 0, // first workspace is auto-active
+      isActive: count === 0,
     });
 
     res.status(201).json({
@@ -79,7 +79,6 @@ router.delete('/workspaces/:id', auth, async (req, res, next) => {
     const workspace = await Workspace.findOne({ _id: req.params.id, user: req.user._id });
     if (!workspace) return res.status(404).json({ error: 'Workspace not found' });
 
-    // If deleted workspace was active, activate the next one
     if (workspace.isActive) {
       const next = await Workspace.findOne({ user: req.user._id, _id: { $ne: workspace._id } });
       if (next) { next.isActive = true; await next.save(); }
@@ -104,7 +103,6 @@ router.get('/subscriptions', auth, async (req, res, next) => {
 
     const workspaces = await Workspace.find(query);
 
-    // Collect unique strand and braid IDs across all matching workspaces
     const strandIdSet = new Set();
     const braidIdSet  = new Set();
     for (const ws of workspaces) {
@@ -112,7 +110,6 @@ router.get('/subscriptions', auth, async (req, res, next) => {
       ws.braids.forEach(id  => braidIdSet.add(id.toString()));
     }
 
-    // Get unread notification targets so we can mark items
     const unreadNotifs = await Notification.find({
       user: req.user._id,
       read: false,
@@ -121,13 +118,11 @@ router.get('/subscriptions', auth, async (req, res, next) => {
     const unreadStrandIds = new Set(unreadNotifs.map(n => n.strandId?.toString()).filter(Boolean));
     const unreadBraidIds  = new Set(unreadNotifs.map(n => n.braidId?.toString()).filter(Boolean));
 
-    // Fetch strands
     const strands = await Strand.find({
       _id:       { $in: [...strandIdSet] },
       published: true,
     }).select('title venue publisherHandle color subscriberCount').lean();
 
-    // Fetch braids and include strandCount from populated strands array
     const braids = await Braid.find({
       _id:       { $in: [...braidIdSet] },
       published: true,
@@ -139,11 +134,11 @@ router.get('/subscriptions', auth, async (req, res, next) => {
         unread: unreadStrandIds.has(s._id.toString()),
       })),
       braids: braids.map(b => ({
-        _id:         b._id,
-        title:       b.title,
+        _id:             b._id,
+        title:           b.title,
         subscriberCount: b.subscriberCount,
-        strandCount: b.strands?.length || 0,
-        unread:      unreadBraidIds.has(b._id.toString()),
+        strandCount:     b.strands?.length || 0,
+        unread:          unreadBraidIds.has(b._id.toString()),
       })),
     });
   } catch (e) { next(e); }
@@ -155,11 +150,10 @@ router.post('/strands', auth, async (req, res, next) => {
     const { strandId, workspaceId } = req.body;
     if (!strandId) return res.status(400).json({ error: 'strandId required' });
 
-    // Verify strand exists and is published
     const strand = await Strand.findOne({ _id: strandId, published: true });
     if (!strand) return res.status(404).json({ error: 'Strand not found' });
 
-    // Resolve target workspace — use supplied ID, active workspace, or first workspace
+    // Resolve target workspace
     let workspace;
     if (workspaceId) {
       workspace = await Workspace.findOne({ _id: workspaceId, user: req.user._id });
@@ -170,15 +164,23 @@ router.post('/strands', auth, async (req, res, next) => {
     }
     if (!workspace) return res.status(400).json({ error: 'No workspace found — create one first' });
 
-    // Idempotent — skip if already subscribed
-    const alreadyIn = workspace.strands.some(id => id.toString() === strandId);
-    if (alreadyIn) return res.json({ ok: true, already: true });
+    // Check if already in this specific workspace — skip silently if so
+    const alreadyInWorkspace = workspace.strands.some(id => id.toString() === strandId);
+    if (alreadyInWorkspace) return res.json({ ok: true, already: true });
+
+    // Check if the user already has this strand in ANY other workspace —
+    // if so, add to this workspace but don't double-count the subscriber
+    const alreadyForUser = await Workspace.exists({
+      user:    req.user._id,
+      strands: strandId,
+    });
 
     workspace.strands.push(strandId);
     await workspace.save();
 
-    // Increment subscriber count on the strand
-    await Strand.findByIdAndUpdate(strandId, { $inc: { subscriberCount: 1 } });
+    if (!alreadyForUser) {
+      await Strand.findByIdAndUpdate(strandId, { $inc: { subscriberCount: 1 } });
+    }
 
     res.json({ ok: true });
   } catch (e) { next(e); }
@@ -190,12 +192,17 @@ router.delete('/strands/:strandId', auth, async (req, res, next) => {
     const { strandId } = req.params;
 
     // Remove from every workspace the user owns
-    const result = await Workspace.updateMany(
+    await Workspace.updateMany(
       { user: req.user._id, strands: strandId },
       { $pull: { strands: strandId } },
     );
 
-    if (result.modifiedCount > 0) {
+    // Only decrement if it's no longer in any of their workspaces
+    const stillSubscribed = await Workspace.exists({
+      user:    req.user._id,
+      strands: strandId,
+    });
+    if (!stillSubscribed) {
       await Strand.findByIdAndUpdate(strandId, { $inc: { subscriberCount: -1 } });
     }
 
@@ -223,14 +230,21 @@ router.post('/braids', auth, async (req, res, next) => {
     }
     if (!workspace) return res.status(400).json({ error: 'No workspace found — create one first' });
 
-    // Add braid if not already subscribed
-    const braidAlreadyIn = workspace.braids.some(id => id.toString() === braidId);
-    if (!braidAlreadyIn) {
+    // Add braid if not already in this workspace
+    const braidAlreadyInWorkspace = workspace.braids.some(id => id.toString() === braidId);
+    if (!braidAlreadyInWorkspace) {
+      // Only increment subscriber count if user doesn't already have it in another workspace
+      const braidAlreadyForUser = await Workspace.exists({
+        user:   req.user._id,
+        braids: braidId,
+      });
       workspace.braids.push(braidId);
-      await Braid.findByIdAndUpdate(braidId, { $inc: { subscriberCount: 1 } });
+      if (!braidAlreadyForUser) {
+        await Braid.findByIdAndUpdate(braidId, { $inc: { subscriberCount: 1 } });
+      }
     }
 
-    // Also add all the braid's strands that aren't already in the workspace
+    // Fan out: add the braid's strands that aren't already in this workspace
     const existingStrandIds = new Set(workspace.strands.map(id => id.toString()));
     const strandsToAdd = braid.strands
       .map(id => id.toString())
@@ -238,10 +252,15 @@ router.post('/braids', auth, async (req, res, next) => {
 
     if (strandsToAdd.length) {
       workspace.strands.push(...strandsToAdd);
-      await Strand.updateMany(
-        { _id: { $in: strandsToAdd } },
-        { $inc: { subscriberCount: 1 } },
-      );
+
+      // For each strand being added, only increment count if not already
+      // subscribed via another workspace
+      for (const sid of strandsToAdd) {
+        const alreadyForUser = await Workspace.exists({ user: req.user._id, strands: sid });
+        if (!alreadyForUser) {
+          await Strand.findByIdAndUpdate(sid, { $inc: { subscriberCount: 1 } });
+        }
+      }
     }
 
     await workspace.save();
@@ -254,12 +273,17 @@ router.delete('/braids/:braidId', auth, async (req, res, next) => {
   try {
     const { braidId } = req.params;
 
-    const result = await Workspace.updateMany(
+    await Workspace.updateMany(
       { user: req.user._id, braids: braidId },
       { $pull: { braids: braidId } },
     );
 
-    if (result.modifiedCount > 0) {
+    // Only decrement if no longer in any workspace
+    const stillSubscribed = await Workspace.exists({
+      user:   req.user._id,
+      braids: braidId,
+    });
+    if (!stillSubscribed) {
       await Braid.findByIdAndUpdate(braidId, { $inc: { subscriberCount: -1 } });
     }
 
