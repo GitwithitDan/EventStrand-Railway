@@ -4,6 +4,11 @@ const Strand  = require('../models/Strand');
 const Braid   = require('../models/Braid');
 const User    = require('../models/User');
 
+// Escape user input for safe use in a MongoDB $regex query
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // GET /api/public/strand/:handle/:strandId
 router.get('/strand/:handle/:strandId', async (req, res, next) => {
   try {
@@ -14,6 +19,11 @@ router.get('/strand/:handle/:strandId', async (req, res, next) => {
       $or: [{ handle }, { previousHandles: handle }]
     });
     if (!user) return res.status(404).json({ error: 'Publisher not found' });
+
+    // If using an old handle, tell the client the canonical one
+    if (user.handle !== handle) {
+      return res.json({ redirect: user.handle });
+    }
 
     const strand = await Strand.findOne({
       _id: strandId,
@@ -39,13 +49,21 @@ router.get('/strand/:handle/:strandId', async (req, res, next) => {
       lastViewedAt: new Date(),
     }).catch(() => {});
 
-    // Track scan origin if via QR (ref header or ?src param)
-    const src = req.query.src || req.get('referer');
-    if (src) {
-      const origin = src.includes('qr') ? 'QR scan' : new URL(src.startsWith('http') ? src : 'http://x/' + src).hostname || 'direct';
-      Strand.findByIdAndUpdate(strandId, {
-        $inc: { scanCount: 1 },
-      }).catch(() => {});
+    // Track scan origin — only fires when ?src=qr is appended (by QR code URLs)
+    const src = req.query.src;
+    if (src === 'qr') {
+      const label = 'QR scan';
+      // Increment existing origin label, or push a new one
+      const updated = await Strand.findOneAndUpdate(
+        { _id: strandId, 'scanOrigins.label': label },
+        { $inc: { scanCount: 1, 'scanOrigins.$.count': 1 } },
+      );
+      if (!updated) {
+        await Strand.findByIdAndUpdate(strandId, {
+          $inc: { scanCount: 1 },
+          $push: { scanOrigins: { label, count: 1 } },
+        });
+      }
     }
 
     res.json({ strand, publisherHandle: user.handle });
@@ -61,6 +79,10 @@ router.get('/braid/:handle/:braidId', async (req, res, next) => {
       $or: [{ handle }, { previousHandles: handle }]
     });
     if (!user) return res.status(404).json({ error: 'Publisher not found' });
+
+    if (user.handle !== handle) {
+      return res.json({ redirect: user.handle });
+    }
 
     const braid = await Braid.findOne({
       _id: braidId,
@@ -93,7 +115,6 @@ router.get('/profile/:handle', async (req, res, next) => {
     });
     if (!user) return res.status(404).json({ error: 'Profile not found' });
 
-    // Redirect to canonical handle if using an old one
     if (user.handle !== handle) {
       return res.json({ redirect: user.handle });
     }
@@ -128,13 +149,15 @@ router.get('/strands/search', async (req, res, next) => {
     const q = req.query.q?.trim();
     if (!q || q.length < 2) return res.json({ strands: [] });
 
+    const safe = escapeRegex(q);
+
     const strands = await Strand.find({
       published: true,
       visibility: 'public',
       $or: [
-        { title: { $regex: q, $options: 'i' } },
-        { venue: { $regex: q, $options: 'i' } },
-        { description: { $regex: q, $options: 'i' } },
+        { title:       { $regex: safe, $options: 'i' } },
+        { venue:       { $regex: safe, $options: 'i' } },
+        { description: { $regex: safe, $options: 'i' } },
       ],
     })
       .select('title venue publisherHandle color subscriberCount')
