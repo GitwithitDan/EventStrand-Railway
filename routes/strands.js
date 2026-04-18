@@ -49,14 +49,14 @@ router.post('/', auth, async (req, res, next) => {
       website:         meta.website,
       visibility:      visibility || meta.visibility || 'public',
       accessCode:      accessCode || meta.access_code,
-      events:          (events || []).map(normaliseEvent),
+      events:          (events || []).map(e => normaliseEvent(e, null)),
       published:       false,
     });
     res.json({ strand });
   } catch (e) { next(e); }
 });
 
-// PUT /api/strands/:id — update strand (silent update to subscribers)
+// PUT /api/strands/:id — update strand, preserving per-event view counters
 router.put('/:id', auth, async (req, res, next) => {
   try {
     const strand = await Strand.findOne({ _id: req.params.id, publisher: req.user._id });
@@ -74,13 +74,24 @@ router.put('/:id', auth, async (req, res, next) => {
       if (meta.visibility)  strand.visibility  = meta.visibility;
       if (meta.access_code) strand.accessCode  = meta.access_code;
     }
-    if (visibility)  strand.visibility = visibility;
+    if (visibility)              strand.visibility = visibility;
     if (accessCode !== undefined) strand.accessCode = accessCode;
-    if (events)      strand.events     = events.map(normaliseEvent);
+
+    if (events) {
+      // Preserve per-event view counters by matching incoming events to existing
+      // ones by their Mongo _id (present on edits) or falling back to title match
+      const existingById    = new Map(strand.events.map(e => [e._id.toString(), e]));
+      const existingByTitle = new Map(strand.events.map(e => [e.title?.toLowerCase(), e]));
+
+      strand.events = events.map(e => {
+        const prev = (e._id && existingById.get(e._id.toString()))
+                  || existingByTitle.get(e.title?.toLowerCase());
+        return normaliseEvent(e, prev?.views ?? 0);
+      });
+    }
 
     await strand.save();
 
-    // Notify subscribers silently (no content — just marks unread)
     if (strand.published && strand.subscriberCount > 0) {
       await notifySubscribers(strand._id, strand.title,
         `${strand.title} has been updated`);
@@ -108,7 +119,6 @@ router.delete('/:id', auth, async (req, res, next) => {
     const strand = await Strand.findOne({ _id: req.params.id, publisher: req.user._id });
     if (!strand) return res.status(404).json({ error: 'Strand not found' });
 
-    // Remove from all workspaces silently
     await Workspace.updateMany({ strands: strand._id }, { $pull: { strands: strand._id } });
     await strand.deleteOne();
     res.json({ ok: true });
@@ -121,13 +131,13 @@ router.get('/:id/analytics', auth, async (req, res, next) => {
     const strand = await Strand.findOne({ _id: req.params.id, publisher: req.user._id });
     if (!strand) return res.status(404).json({ error: 'Not found' });
     res.json({
-      title:          strand.title,
+      title:           strand.title,
       subscriberCount: strand.subscriberCount,
-      totalViews:     strand.viewCount,
-      viewsThisMonth: strand.viewsHistory.slice(-30).reduce((a, b) => a + b, 0),
-      scanCount:      strand.scanCount,
-      viewsLast30:    strand.viewsHistory.slice(-30),
-      topScanOrigins: strand.scanOrigins.slice(0, 5).map(o => ({
+      totalViews:      strand.viewCount,
+      viewsThisMonth:  strand.viewsHistory.slice(-30).reduce((a, b) => a + b, 0),
+      scanCount:       strand.scanCount,
+      viewsLast30:     strand.viewsHistory.slice(-30),
+      topScanOrigins:  strand.scanOrigins.slice(0, 5).map(o => ({
         label: o.label,
         count: o.count,
         pct:   strand.scanCount ? Math.round((o.count / strand.scanCount) * 100) : 0,
@@ -138,8 +148,8 @@ router.get('/:id/analytics', auth, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Normalise incoming event data from .rcal format
-function normaliseEvent(e) {
+// Normalise incoming event data from .rcal format, preserving existing view count
+function normaliseEvent(e, existingViews) {
   return {
     title:          e.title,
     category:       e.category,
@@ -156,6 +166,7 @@ function normaliseEvent(e) {
     date_list:      e.date_list || [],
     recurrence:     e.recurrence || [],
     exceptions:     e.exceptions || [],
+    views:          existingViews ?? e.views ?? 0,
   };
 }
 
