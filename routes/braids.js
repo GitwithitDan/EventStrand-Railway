@@ -90,4 +90,26 @@ router.delete('/:id', auth, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// GET /api/braids/:id/analytics
+router.get('/:id/analytics', auth, async (req, res, next) => {
+  try {
+    const braid = await Braid.findOne({ _id: req.params.id, publisher: req.user._id })
+      .populate('strands', 'title subscriberCount');
+    if (!braid) return res.status(404).json({ error: 'Not found' });
+    res.json({
+      title:           braid.title,
+      subscriberCount: braid.subscriberCount,
+      totalViews:      braid.viewCount,
+      scanCount:       braid.scanCount || 0,
+      strandCount:     braid.strands.length,
+      topScanOrigins:  (braid.scanOrigins || []).slice(0, 5).map(o => ({
+        label: o.label,
+        count: o.count,
+        pct:   braid.scanCount ? Math.round((o.count / braid.scanCount) * 100) : 0,
+      })),
+      strands: braid.strands.map(s => ({ title: s.title, subscribers: s.subscriberCount || 0 })),
+    });
+  } catch (e) { next(e); }
+});
+
 module.exports = router;
