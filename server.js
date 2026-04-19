@@ -2,9 +2,16 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 
 const app = express();
+
+// ── SECURITY HEADERS ──────────────────────────────────────────
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }, // allow QR image embeds
+  contentSecurityPolicy: false, // managed by Cloudflare
+}));
 
 // ── TRUST PROXY (required for correct IP detection behind Cloudflare + Railway) ──
 app.set('trust proxy', 1);
