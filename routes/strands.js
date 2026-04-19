@@ -30,6 +30,15 @@ router.get('/mine', auth, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// GET /api/strands/:id — load a single owned strand (for editing)
+router.get('/:id', auth, async (req, res, next) => {
+  try {
+    const strand = await Strand.findOne({ _id: req.params.id, publisher: req.user._id });
+    if (!strand) return res.status(404).json({ error: 'Strand not found' });
+    res.json({ strand });
+  } catch (e) { next(e); }
+});
+
 // POST /api/strands — create new strand
 router.post('/', auth, async (req, res, next) => {
   try {
@@ -38,7 +47,7 @@ router.post('/', auth, async (req, res, next) => {
 
     const strand = await Strand.create({
       publisher:       req.user._id,
-      publisherHandle: req.user.handle,
+      publisherHandle: req.user.handle || null,
       title:           meta.title,
       description:     meta.description,
       type:            meta.type,
@@ -67,7 +76,10 @@ router.put('/:id', auth, async (req, res, next) => {
       if (meta.title)       strand.title       = meta.title;
       if (meta.description) strand.description = meta.description;
       if (meta.type)        strand.type        = meta.type;
-      if (meta.location)    strand.venue       = meta.location;
+      if (meta.location) {
+        strand.venue   = meta.location;
+        strand.address = meta.location;   // keep both fields in sync
+      }
       if (meta.timezone)    strand.timezone    = meta.timezone;
       if (meta.color)       strand.color       = meta.color;
       if (meta.website)     strand.website     = meta.website;
@@ -106,6 +118,7 @@ router.post('/:id/publish', auth, async (req, res, next) => {
   try {
     const strand = await Strand.findOne({ _id: req.params.id, publisher: req.user._id });
     if (!strand) return res.status(404).json({ error: 'Strand not found' });
+    if (!req.user.handle) return res.status(400).json({ error: 'Set a handle before publishing' });
     strand.published = true;
     strand.publisherHandle = req.user.handle;
     await strand.save();
