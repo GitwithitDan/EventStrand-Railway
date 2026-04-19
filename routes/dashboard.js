@@ -96,8 +96,14 @@ function getUpcomingDates(ev, from, to) {
     } else if (rule.pattern === 'monthly_date') {
       match = d.getDate() === (rule.month_date || 1);
     } else if (rule.pattern === 'annual') {
-      // stored as MM-DD in season_start for annual events
-      match = rule.days?.includes(dayAbbr) || false;
+      // Annual events: match by specific date (month_date) within season, or by day-of-week within season
+      if (rule.month_date) {
+        match = d.getDate() === rule.month_date;
+      } else if (rule.days?.length) {
+        match = rule.days.includes(dayAbbr);
+      } else {
+        match = true; // match every day in the season window (e.g. a holiday period)
+      }
     }
 
     // Season filter
