@@ -70,6 +70,30 @@ router.post('/workspaces/:id/activate', auth, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// PATCH /api/user/workspaces/:id — rename or change icon
+router.patch('/workspaces/:id', auth, async (req, res, next) => {
+  try {
+    const workspace = await Workspace.findOne({ _id: req.params.id, user: req.user._id });
+    if (!workspace) return res.status(404).json({ error: 'Workspace not found' });
+
+    const { name, icon } = req.body;
+    if (name !== undefined) workspace.name = name.trim().slice(0, 50);
+    if (icon !== undefined) workspace.icon = icon;
+    await workspace.save();
+
+    res.json({
+      workspace: {
+        _id:         workspace._id,
+        name:        workspace.name,
+        icon:        workspace.icon,
+        isActive:    workspace.isActive,
+        strandCount: workspace.strands.length,
+        braidCount:  workspace.braids.length,
+      },
+    });
+  } catch (e) { next(e); }
+});
+
 // DELETE /api/user/workspaces/:id
 router.delete('/workspaces/:id', auth, async (req, res, next) => {
   try {
