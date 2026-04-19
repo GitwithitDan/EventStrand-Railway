@@ -11,6 +11,8 @@ const braidSchema = new mongoose.Schema({
   strands:         [{ type: mongoose.Schema.Types.ObjectId, ref: 'Strand' }],
   subscriberCount: { type: Number, default: 0 },
   viewCount:       { type: Number, default: 0 },
+  scanCount:       { type: Number, default: 0 },
+  scanOrigins:     [{ label: String, count: Number }],
 }, { timestamps: true });
 
 braidSchema.index({ publisher: 1 });
