@@ -63,6 +63,19 @@ router.put('/:id', auth, async (req, res, next) => {
         if (toAdd.length) {
           ws.strands.push(...toAdd);
           await ws.save();
+
+          // Increment subscriber count for each newly-added strand,
+          // but only if this user didn't already have it in another workspace
+          for (const sid of toAdd) {
+            const alreadyElsewhere = await Workspace.exists({
+              user:    ws.user,
+              _id:     { $ne: ws._id },
+              strands: sid,
+            });
+            if (!alreadyElsewhere) {
+              await Strand.findByIdAndUpdate(sid, { $inc: { subscriberCount: 1 } });
+            }
+          }
         }
       }
       const userIds = [...new Set(workspaces.map(w => w.user.toString()))];
