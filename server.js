@@ -51,6 +51,7 @@ app.use('/api/auth',      require('./routes/auth'));
 app.use('/api/strands',   require('./routes/strands'));
 app.use('/api/braids',    require('./routes/braids'));
 app.use('/api/user',      require('./routes/user'));
+app.use('/api/user',      require('./routes/interested'));
 app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/public',    require('./routes/public'));
 app.use('/api/qr',        require('./routes/qr'));
