@@ -101,6 +101,22 @@ router.get('/braid/:handle/:braidId', async (req, res, next) => {
 
     Braid.findByIdAndUpdate(braidId, { $inc: { viewCount: 1 } }).catch(() => {});
 
+    // Track scan origin for braid QR codes
+    const src = req.query.src;
+    if (src === 'qr') {
+      const label = 'QR scan';
+      const updated = await Braid.findOneAndUpdate(
+        { _id: braidId, 'scanOrigins.label': label },
+        { $inc: { scanCount: 1, 'scanOrigins.$.count': 1 } },
+      );
+      if (!updated) {
+        await Braid.findByIdAndUpdate(braidId, {
+          $inc: { scanCount: 1 },
+          $push: { scanOrigins: { label, count: 1 } },
+        });
+      }
+    }
+
     res.json({ braid: { ...braid.toObject(), publisherHandle: user.handle } });
   } catch (e) { next(e); }
 });
