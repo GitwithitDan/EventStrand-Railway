@@ -18,7 +18,8 @@ router.get('/upcoming', auth, async (req, res, next) => {
     });
 
     const now    = new Date();
-    const cutoff = new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000); // 60 days
+    const days   = Math.min(parseInt(req.query.days) || 60, 365);
+    const cutoff = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
     const events = [];
     const seenStrands = new Set();
 
