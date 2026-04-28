@@ -56,6 +56,7 @@ app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/public',    require('./routes/public'));
 app.use('/api/qr',        require('./routes/qr'));
 app.use('/api/apikeys',   require('./routes/apikeys'));
+app.use('/api/directory', require('./routes/directory'));
 
 // ── HEALTH ────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
