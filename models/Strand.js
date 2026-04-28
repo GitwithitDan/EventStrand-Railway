@@ -67,6 +67,13 @@ const strandSchema = new mongoose.Schema({
   accessCode:       String,
   published:        { type: Boolean, default: false },
   events:           [eventSchema],
+  // directory
+  directoryOptIn:          { type: Boolean, default: false },
+  directoryVerificationUrl: String,
+  directoryStatus:         { type: String, enum: ['none','pending','verified','flagged'], default: 'none' },
+  directoryVerifiedAt:     Date,
+  directoryLastAttemptAt:  Date,
+  directoryLastError:      String,
   // analytics
   viewCount:        { type: Number, default: 0 },
   scanCount:        { type: Number, default: 0 },
