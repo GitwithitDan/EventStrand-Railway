@@ -308,4 +308,39 @@ router.delete('/:id/withdraw', auth, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// GET /api/directory/public/directory — public listing of verified strands
+// No auth required. Filterable by type and city. Paginated (24 per page).
+router.get('/public/directory', async (req, res, next) => {
+  try {
+    const { type, city, page = 1 } = req.query;
+    const limit = 24;
+    const skip  = (parseInt(page) - 1) * limit;
+
+    const filter = {
+      directoryStatus: 'verified',
+      published:       true,
+      visibility:      'public',
+    };
+    if (type) filter.type = type;
+    if (city) filter.city = new RegExp(city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+
+    const [strands, total] = await Promise.all([
+      Strand.find(filter)
+        .select('title type venue city description color publisherHandle')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Strand.countDocuments(filter),
+    ]);
+
+    res.json({
+      strands,
+      total,
+      page:  parseInt(page),
+      pages: Math.ceil(total / limit),
+    });
+  } catch (e) { next(e); }
+});
+
 module.exports = router;
