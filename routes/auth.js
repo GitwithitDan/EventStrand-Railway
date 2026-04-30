@@ -17,7 +17,7 @@ function signToken(userId) {
 // POST /api/auth/register — email + password account creation
 router.post('/register', async (req, res, next) => {
   try {
-    const { email, password, displayName } = req.body;
+    const { email, password, displayName, accountType } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
     if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
 
@@ -29,12 +29,13 @@ router.post('/register', async (req, res, next) => {
       email: email.toLowerCase(),
       passwordHash,
       displayName: displayName ? displayName.trim().slice(0, 60) : email.split('@')[0],
+      accountType: accountType === 'venue' ? 'venue' : 'personal',
     });
 
     const token = signToken(user._id);
     res.status(201).json({
       token,
-      user: { id: user._id, email: user.email, displayName: user.displayName, picture: user.picture, handle: user.handle || null },
+      user: { id: user._id, email: user.email, displayName: user.displayName, picture: user.picture, handle: user.handle || null, accountType: user.accountType },
     });
   } catch (e) {
     next(e);
