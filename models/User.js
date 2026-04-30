@@ -7,6 +7,7 @@ const userSchema = new mongoose.Schema({
   displayName:     { type: String, default: '' },
   picture:         { type: String, default: '' },
   handle:          { type: String, unique: true, sparse: true, lowercase: true, trim: true },
+  accountType:     { type: String, enum: ['personal', 'venue'], default: 'personal' },
   // Handle history — old handles redirect to current
   previousHandles: [{ type: String, lowercase: true }],
 }, { timestamps: true });
