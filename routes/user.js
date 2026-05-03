@@ -104,8 +104,8 @@ router.delete('/workspaces/:id', auth, async (req, res, next) => {
     if (!workspace) return res.status(404).json({ error: 'Workspace not found' });
 
     if (workspace.isActive) {
-      const next = await Workspace.findOne({ user: req.user._id, _id: { $ne: workspace._id } });
-      if (next) { next.isActive = true; await next.save(); }
+      const replacement = await Workspace.findOne({ user: req.user._id, _id: { $ne: workspace._id } });
+      if (replacement) { replacement.isActive = true; await replacement.save(); }
     }
 
     await workspace.deleteOne();
