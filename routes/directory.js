@@ -52,7 +52,7 @@ async function layer2Puppeteer(verificationUrl, strandUrl) {
   try {
     const puppeteer = require('puppeteer');
     browser = await puppeteer.launch({
-      headless: 'new',
+      headless: true,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -83,7 +83,7 @@ async function layer3QrDecode(verificationUrl, strandUrl) {
     const jsQR      = require('jsqr');
 
     browser = await puppeteer.launch({
-      headless: 'new',
+      headless: true,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
