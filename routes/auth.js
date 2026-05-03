@@ -6,6 +6,9 @@ const { OAuth2Client } = require('google-auth-library');
 const User     = require('../models/User');
 const auth     = require('../middleware/auth');
 
+if (!process.env.GOOGLE_CLIENT_ID) throw new Error('GOOGLE_CLIENT_ID env var is required');
+if (!process.env.JWT_SECRET)       throw new Error('JWT_SECRET env var is required');
+
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const RESERVED_HANDLES = ['admin','api','app','eventstrand','www','support','help','static','assets','s','b','p','spec'];
@@ -77,11 +80,15 @@ router.post('/google', async (req, res, next) => {
     const payload = ticket.getPayload();
     const { sub: googleId, email, name, picture } = payload;
 
+    // Normalise email for all lookups — fixes duplicate account bug when
+    // Google returns mixed-case addresses for existing password-auth users
+    const normEmail = email.toLowerCase();
+
     let user = await User.findOne({ googleId });
-    if (!user) user = await User.findOne({ email });
+    if (!user) user = await User.findOne({ email: normEmail });
 
     if (!user) {
-      user = await User.create({ googleId, email, displayName: name, picture });
+      user = await User.create({ googleId, email: normEmail, displayName: name, picture });
     } else {
       user.googleId    = googleId;
       user.picture     = picture || user.picture;
@@ -131,7 +138,6 @@ router.post('/set-handle', auth, async (req, res, next) => {
     }
     const lower = handle.toLowerCase();
 
-    // Apply the same reserved list check as check-handle
     if (RESERVED_HANDLES.includes(lower)) {
       return res.status(400).json({ error: 'That handle is reserved' });
     }
@@ -143,6 +149,10 @@ router.post('/set-handle', auth, async (req, res, next) => {
     if (oldHandle && oldHandle !== lower) {
       if (!req.user.previousHandles.includes(oldHandle)) {
         req.user.previousHandles.push(oldHandle);
+        // Cap at 10 to prevent unbounded growth
+        if (req.user.previousHandles.length > 10) {
+          req.user.previousHandles = req.user.previousHandles.slice(-10);
+        }
       }
       const Strand = require('../models/Strand');
       const Braid  = require('../models/Braid');
