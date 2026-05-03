@@ -9,10 +9,12 @@ const interestedSchema = new mongoose.Schema({
   title:     String,
   venue:     String,
   strand:    String,
-  expiresAt: { type: Date, required: true, index: true },
+  expiresAt: { type: Date, required: true },
 }, { timestamps: true });
 
 // One entry per user+key — makes upsert safe
 interestedSchema.index({ user: 1, key: 1 }, { unique: true });
+// TTL — MongoDB auto-deletes documents once expiresAt passes
+interestedSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 module.exports = mongoose.model('Interested', interestedSchema);
