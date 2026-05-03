@@ -2,26 +2,76 @@ const express  = require('express');
 const router   = express.Router();
 const auth     = require('../middleware/auth');
 const Strand   = require('../models/Strand');
+const dns      = require('dns').promises;
+const net      = require('net');
+
+// ── SSRF PROTECTION ──────────────────────────────────────────────────────────
+// Reject any URL whose resolved IP falls in a private/loopback/link-local range.
+// Applied before every outbound fetch and before every Puppeteer goto().
+
+const PRIVATE_RANGES = [
+  /^127\./,
+  /^10\./,
+  /^172\.(1[6-9]|2\d|3[01])\./,
+  /^192\.168\./,
+  /^169\.254\./,
+  /^::1$/,
+  /^fc[0-9a-f]{2}:/i,
+  /^fd[0-9a-f]{2}:/i,
+  /^fe80:/i,
+  /^0\./,
+];
+
+function isPrivateIp(ip) {
+  return PRIVATE_RANGES.some(r => r.test(ip));
+}
+
+async function assertPublicHostname(hostname) {
+  // Reject well-known local names without a DNS lookup
+  if (hostname === 'localhost' || hostname.endsWith('.local') || hostname.endsWith('.internal')) {
+    throw new Error(`Hostname "${hostname}" is not allowed`);
+  }
+  // For numeric IPs validate directly
+  if (net.isIP(hostname)) {
+    if (isPrivateIp(hostname)) throw new Error(`IP address "${hostname}" is not allowed`);
+    return;
+  }
+  // DNS resolve and check every returned address
+  let addrs;
+  try {
+    addrs = await dns.lookup(hostname, { all: true });
+  } catch (e) {
+    throw new Error(`Could not resolve hostname "${hostname}"`);
+  }
+  for (const { address } of addrs) {
+    if (isPrivateIp(address)) throw new Error(`Hostname "${hostname}" resolves to a private address`);
+  }
+}
+
+async function safeFetch(url, options = {}) {
+  const parsed = new URL(url);
+  await assertPublicHostname(parsed.hostname);
+  return fetch(url, options);
+}
+
+async function safePuppeteerGoto(page, url, options = {}) {
+  const parsed = new URL(url);
+  await assertPublicHostname(parsed.hostname);
+  // Also intercept any redirects or sub-requests from the page itself
+  await page.setRequestInterception(true);
+  page.on('request', async req => {
+    try {
+      const reqUrl = new URL(req.url());
+      await assertPublicHostname(reqUrl.hostname);
+      req.continue();
+    } catch (_) {
+      req.abort();
+    }
+  });
+  return page.goto(url, options);
+}
 
 // ── VERIFICATION ENGINE ──────────────────────────────────────────────────────
-//
-// Three-layer pipeline. Each layer is attempted in order; the first that
-// confirms the strand URL on the page marks the strand as verified and returns.
-// If all three fail the strand is flagged for manual review (never auto-rejected).
-//
-// Layer 1 — Static HTML fetch
-//   Simple HTTP GET of the verification URL, search raw HTML for the strand URL.
-//   Catches most cases: venues that embed a plain text link.
-//
-// Layer 2 — Headless browser render (Puppeteer)
-//   Full JS-rendered DOM. Catches React/Vue/Squarespace/Wix sites where the
-//   link is injected by JavaScript after page load.
-//
-// Layer 3 — QR image decode
-//   Puppeteer page screenshot + all <img> src values → fetch each → decode
-//   with jimp + jsqr. Catches venues that embed the QR image without a text link.
-//
-// ─────────────────────────────────────────────────────────────────────────────
 
 function buildStrandUrl(strand) {
   const handle = strand.publisherHandle;
@@ -29,10 +79,9 @@ function buildStrandUrl(strand) {
   return `https://eventstrand.com/s/${handle}/${id}`;
 }
 
-// Layer 1: plain HTTP fetch → search raw HTML
 async function layer1StaticFetch(verificationUrl, strandUrl) {
   try {
-    const res = await fetch(verificationUrl, {
+    const res = await safeFetch(verificationUrl, {
       headers: { 'User-Agent': 'EventStrand-Verifier/1.0 (+https://eventstrand.com)' },
       signal:  AbortSignal.timeout(10000),
       redirect: 'follow',
@@ -46,7 +95,6 @@ async function layer1StaticFetch(verificationUrl, strandUrl) {
   }
 }
 
-// Layer 2: headless Puppeteer render → search rendered DOM
 async function layer2Puppeteer(verificationUrl, strandUrl) {
   let browser;
   try {
@@ -63,7 +111,7 @@ async function layer2Puppeteer(verificationUrl, strandUrl) {
     });
     const page = await browser.newPage();
     await page.setUserAgent('EventStrand-Verifier/1.0 (+https://eventstrand.com)');
-    await page.goto(verificationUrl, { waitUntil: 'networkidle2', timeout: 20000 });
+    await safePuppeteerGoto(page, verificationUrl, { waitUntil: 'networkidle2', timeout: 20000 });
     const bodyText = await page.evaluate(() => document.documentElement.innerHTML);
     return bodyText.includes(strandUrl);
   } catch (e) {
@@ -74,7 +122,6 @@ async function layer2Puppeteer(verificationUrl, strandUrl) {
   }
 }
 
-// Layer 3: QR decode from page images
 async function layer3QrDecode(verificationUrl, strandUrl) {
   let browser;
   try {
@@ -94,21 +141,18 @@ async function layer3QrDecode(verificationUrl, strandUrl) {
     });
     const page = await browser.newPage();
     await page.setUserAgent('EventStrand-Verifier/1.0 (+https://eventstrand.com)');
-    await page.goto(verificationUrl, { waitUntil: 'networkidle2', timeout: 20000 });
+    await safePuppeteerGoto(page, verificationUrl, { waitUntil: 'networkidle2', timeout: 20000 });
 
-    // Collect all image URLs visible on the page
     const imgSrcs = await page.evaluate(() => {
       return Array.from(document.images)
         .map(img => img.src)
         .filter(src => src && src.startsWith('http'));
     });
 
-    // Also grab a full-page screenshot — catches inline QR codes rendered as canvas
     const screenshot = await page.screenshot({ fullPage: true });
     await browser.close().catch(() => {});
     browser = null;
 
-    // Helper: decode QR from a buffer
     async function decodeBuffer(buffer) {
       try {
         const image = await Jimp.read(buffer);
@@ -120,14 +164,12 @@ async function layer3QrDecode(verificationUrl, strandUrl) {
       }
     }
 
-    // Check screenshot first
     const screenshotResult = await decodeBuffer(screenshot);
     if (screenshotResult && screenshotResult.includes(strandUrl)) return true;
 
-    // Check individual images (cap at 15 to keep runtime reasonable)
     for (const src of imgSrcs.slice(0, 15)) {
       try {
-        const imgRes = await fetch(src, {
+        const imgRes = await safeFetch(src, {
           signal: AbortSignal.timeout(5000),
           headers: { 'User-Agent': 'EventStrand-Verifier/1.0' },
         });
@@ -136,7 +178,7 @@ async function layer3QrDecode(verificationUrl, strandUrl) {
         const qrData = await decodeBuffer(buf);
         if (qrData && qrData.includes(strandUrl)) return true;
       } catch (e) {
-        // skip this image, try next
+        // skip this image
       }
     }
 
@@ -149,7 +191,6 @@ async function layer3QrDecode(verificationUrl, strandUrl) {
   }
 }
 
-// Main async verification job — fire-and-forget from routes
 async function runVerification(strandId) {
   let strand;
   try {
@@ -165,7 +206,6 @@ async function runVerification(strandId) {
 
     console.log(`[verify] starting for strand ${strandId}, url: ${url}`);
 
-    // Layer 1
     console.log('[verify] Layer 1: static fetch');
     if (await layer1StaticFetch(url, strandUrl)) {
       console.log('[verify] L1 ✓ verified');
@@ -175,7 +215,6 @@ async function runVerification(strandId) {
       return;
     }
 
-    // Layer 2
     console.log('[verify] Layer 2: puppeteer render');
     if (await layer2Puppeteer(url, strandUrl)) {
       console.log('[verify] L2 ✓ verified');
@@ -185,7 +224,6 @@ async function runVerification(strandId) {
       return;
     }
 
-    // Layer 3
     console.log('[verify] Layer 3: QR decode');
     if (await layer3QrDecode(url, strandUrl)) {
       console.log('[verify] L3 ✓ verified');
@@ -195,7 +233,6 @@ async function runVerification(strandId) {
       return;
     }
 
-    // All layers failed — flag for manual review, never auto-reject
     console.log(`[verify] all layers failed for ${strandId} — flagged for review`);
     strand.directoryStatus    = 'flagged';
     strand.directoryLastError = `Strand URL not found on ${url} via static fetch, rendered DOM, or QR image decode. Flagged for manual review.`;
@@ -232,13 +269,21 @@ router.post('/:id/submit', auth, async (req, res, next) => {
       return res.status(400).json({ error: 'verificationUrl must be http or https' });
     }
 
+    // Apply the same 60-second cooldown as reverify — prevents rapid re-submissions
+    if (strand.directoryLastAttemptAt) {
+      const elapsed = Date.now() - strand.directoryLastAttemptAt.getTime();
+      if (elapsed < 60 * 1000) {
+        const wait = Math.ceil((60 * 1000 - elapsed) / 1000);
+        return res.status(429).json({ error: `Please wait ${wait}s before re-submitting` });
+      }
+    }
+
     strand.directoryOptIn            = true;
     strand.directoryVerificationUrl  = url.href;
     strand.directoryStatus           = 'pending';
     strand.directoryLastError        = null;
     await strand.save();
 
-    // Fire verification async — respond immediately so venue isn't waiting
     setImmediate(() => runVerification(strand._id.toString()));
 
     res.json({ ok: true, status: 'pending', message: 'Verification started — check back in a minute.' });
@@ -257,7 +302,6 @@ router.post('/:id/reverify', auth, async (req, res, next) => {
       return res.status(400).json({ error: 'Verification already running' });
     }
 
-    // Enforce a cooldown: at least 60 seconds between re-verify attempts
     if (strand.directoryLastAttemptAt) {
       const elapsed = Date.now() - strand.directoryLastAttemptAt.getTime();
       if (elapsed < 60 * 1000) {
@@ -309,7 +353,6 @@ router.delete('/:id/withdraw', auth, async (req, res, next) => {
 });
 
 // GET /api/directory/public/directory — public listing of verified strands
-// No auth required. Filterable by type and city. Paginated (24 per page).
 router.get('/public/directory', async (req, res, next) => {
   try {
     const { type, city, page = 1 } = req.query;
@@ -334,6 +377,8 @@ router.get('/public/directory', async (req, res, next) => {
       Strand.countDocuments(filter),
     ]);
 
+    // Public endpoint — allow Cloudflare to cache for 60s
+    res.set('Cache-Control', 's-maxage=60, stale-while-revalidate=300');
     res.json({
       strands,
       total,
