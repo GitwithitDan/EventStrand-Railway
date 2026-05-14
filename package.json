@@ -20,7 +20,9 @@
     "qrcode": "^1.5.4",
     "puppeteer": "^22.0.0",
     "jimp": "^0.22.12",
-    "jsqr": "^1.4.0"
+    "jsqr": "^1.4.0",
+    "luxon": "^3.5.0",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "nodemon": "^3.1.3"
