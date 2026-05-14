@@ -20,14 +20,39 @@ const rateLimit = require('express-rate-limit');
 const app = express();
 
 // ── SECURITY HEADERS ──────────────────────────────────────────
+// CSP rationale:
+//  - 'unsafe-inline' on script-src is required because index.html
+//    contains 230+ inline event handlers (onclick=, onchange=,
+//    oninput=) generated dynamically via template literals. A future
+//    refactor to addEventListener delegation can remove this.
+//  - 'unsafe-inline' on style-src covers 400+ inline style="..."
+//    attributes throughout the SPA.
+//  - object-src 'none' blocks <object>/<embed>/<applet> entirely.
+//  - frame-ancestors 'self' blocks clickjacking via iframes.
+//  - base-uri 'self' prevents <base> tag injection from rerouting
+//    relative URLs to attacker-controlled origins.
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }, // allow QR image embeds
-  contentSecurityPolicy: false, // managed by Cloudflare
+  contentSecurityPolicy: {
+    useDefaults: false,
+    directives: {
+      'default-src':     ["'self'"],
+      'script-src':      ["'self'", "'unsafe-inline'", 'https://accounts.google.com', 'https://cdn.mxpnl.com', 'https://*.mxpnl.com'],
+      'script-src-attr': ["'unsafe-inline'"],
+      'style-src':       ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      'font-src':        ["'self'", 'https://fonts.gstatic.com', 'data:'],
+      'img-src':         ["'self'", 'data:', 'https:', 'blob:'],
+      'connect-src':     ["'self'", 'https://api.eventstrand.com', 'https://accounts.google.com', 'https://*.mxpnl.com', 'https://api-js.mixpanel.com'],
+      'frame-src':       ['https://accounts.google.com'],
+      'frame-ancestors': ["'self'"],
+      'object-src':      ["'none'"],
+      'base-uri':        ["'self'"],
+      'form-action':     ["'self'"],
+    },
+  },
 }));
 
 // ── TRUST PROXY ──────────────────────────────────────────────
-// Railway sits behind Cloudflare. Using `true` trusts the full chain
-// and lets req.ip resolve to the real client IP from CF-Connecting-IP.
 app.set('trust proxy', true);
 
 // ── CORS ─────────────────────────────────────────────────────
@@ -42,16 +67,12 @@ app.use(cors({
     if (!origin || allowedOrigins.includes(origin)) cb(null, true);
     else cb(new Error('Not allowed by CORS'));
   },
-  // credentials:true is not needed — auth uses Bearer tokens in headers,
-  // not cookies. Keeping it false reduces CORS attack surface.
   credentials: false,
 }));
 
 app.use(express.json({ limit: '2mb' }));
 
 // ── RATE LIMITING ─────────────────────────────────────────────
-// keyGenerator reads the real client IP via CF-Connecting-IP header,
-// which Cloudflare sets and Railway forwards.
 function cfIp(req) {
   return req.headers['cf-connecting-ip'] || req.ip;
 }
@@ -70,11 +91,17 @@ app.use('/api/', rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 }));
+// SSR pages get a separate, lighter limit — these are public, cacheable, and
+// hit by both crawlers and direct users.
+app.use(['/ssr', '/sitemap.xml', '/robots.txt'], rateLimit({
+  windowMs: 60 * 1000,
+  max: 600,
+  keyGenerator: cfIp,
+  standardHeaders: true,
+  legacyHeaders: false,
+}));
 
 // ── CACHE HEADERS ─────────────────────────────────────────────
-// Default: no caching for all API routes. Individual routes that
-// serve stable public data (directory, public strand/braid/profile, QR)
-// set their own cache headers to override this.
 app.use('/api', (req, res, next) => {
   if (!req.path.startsWith('/qr') && !req.path.startsWith('/directory/public') && !req.path.startsWith('/public/')) {
     res.set('Cache-Control', 'no-store');
@@ -94,6 +121,27 @@ app.use('/api/qr',        require('./routes/qr'));
 app.use('/api/apikeys',   require('./routes/apikeys'));
 app.use('/api/directory', require('./routes/directory'));
 
+// ── SSR + SITEMAP ─────────────────────────────────────────────
+// These are mounted at the root so Cloudflare Page Rules can proxy
+// /s/*, /b/*, /p/*, /sitemap.xml, /robots.txt to the backend without
+// path rewriting. The SSR routes match /s/:handle/:strandId etc.
+app.use('/',    require('./routes/sitemap'));
+app.use('/ssr', require('./routes/ssr'));
+// Direct path mounts so Cloudflare can simply forward without a rewrite
+app.use('/s',   (req, res, next) => {
+  // Forward to /ssr/strand internally
+  req.url = `/strand${req.url}`;
+  return require('./routes/ssr')(req, res, next);
+});
+app.use('/b',   (req, res, next) => {
+  req.url = `/braid${req.url}`;
+  return require('./routes/ssr')(req, res, next);
+});
+app.use('/p',   (req, res, next) => {
+  req.url = `/profile${req.url}`;
+  return require('./routes/ssr')(req, res, next);
+});
+
 // ── HEALTH ────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
@@ -110,9 +158,6 @@ mongoose.connect(process.env.MONGODB_URI)
     const PORT = process.env.PORT || 3000;
     const server = app.listen(PORT, () => console.log(`EventStrand API running on port ${PORT}`));
 
-    // ── GRACEFUL SHUTDOWN ─────────────────────────────────────
-    // Allows Railway re-deploys to finish in-flight requests cleanly
-    // instead of hard-killing connections and causing 502s.
     function gracefulShutdown(signal) {
       console.log(`${signal} received — shutting down gracefully`);
       server.close(() => {
@@ -121,7 +166,6 @@ mongoose.connect(process.env.MONGODB_URI)
           process.exit(0);
         });
       });
-      // Force exit if graceful shutdown takes more than 10s
       setTimeout(() => { console.error('Forced exit after timeout'); process.exit(1); }, 10000);
     }
     process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
