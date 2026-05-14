@@ -5,6 +5,7 @@ const Braid    = require('../models/Braid');
 const Strand   = require('../models/Strand');
 const Workspace = require('../models/Workspace');
 const Notification = require('../models/Notification');
+const { validate, schemas } = require('../lib/validators');
 
 // GET /api/braids/mine
 router.get('/mine', auth, async (req, res, next) => {
@@ -17,7 +18,7 @@ router.get('/mine', auth, async (req, res, next) => {
 });
 
 // POST /api/braids — create braid
-router.post('/', auth, async (req, res, next) => {
+router.post('/', auth, validate(schemas.braidCreate), async (req, res, next) => {
   try {
     const { title, description, strandIds, visibility, accessCode } = req.body;
     if (!title) return res.status(400).json({ error: 'Title required' });
@@ -37,7 +38,7 @@ router.post('/', auth, async (req, res, next) => {
 
 // PUT /api/braids/:id — update braid
 // If new strands added, notify existing subscribers silently
-router.put('/:id', auth, async (req, res, next) => {
+router.put('/:id', auth, validate(schemas.braidUpdate), async (req, res, next) => {
   try {
     const braid = await Braid.findOne({ _id: req.params.id, publisher: req.user._id });
     if (!braid) return res.status(404).json({ error: 'Braid not found' });
