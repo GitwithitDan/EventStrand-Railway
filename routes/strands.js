@@ -4,6 +4,7 @@ const auth     = require('../middleware/auth');
 const Strand   = require('../models/Strand');
 const Workspace = require('../models/Workspace');
 const Notification = require('../models/Notification');
+const { validate, schemas } = require('../lib/validators');
 
 // Notify all subscribers of a strand update
 async function notifySubscribers(strandId, strandTitle, message) {
@@ -40,7 +41,7 @@ router.get('/:id', auth, async (req, res, next) => {
 });
 
 // POST /api/strands — create new strand
-router.post('/', auth, async (req, res, next) => {
+router.post('/', auth, validate(schemas.strandCreate), async (req, res, next) => {
   try {
     const { rcal, meta, events, visibility, accessCode } = req.body;
     if (!meta?.title) return res.status(400).json({ error: 'Title is required' });
@@ -66,7 +67,7 @@ router.post('/', auth, async (req, res, next) => {
 });
 
 // PUT /api/strands/:id — update strand, preserving per-event view counters
-router.put('/:id', auth, async (req, res, next) => {
+router.put('/:id', auth, validate(schemas.strandUpdate), async (req, res, next) => {
   try {
     const strand = await Strand.findOne({ _id: req.params.id, publisher: req.user._id });
     if (!strand) return res.status(404).json({ error: 'Strand not found' });
