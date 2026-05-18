@@ -23,6 +23,20 @@ function signToken(userId) {
   return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: '90d' });
 }
 
+// Set the JWT as an httpOnly cookie so JS cannot read it (XSS protection).
+// secure:true requires HTTPS — safe for production; Railway + Cloudflare always serve HTTPS.
+// sameSite:'strict' is valid here because eventstrand.com and api.eventstrand.com share the
+// same eTLD+1 (eventstrand.com), so requests from the frontend to the API are same-site.
+function setAuthCookie(res, token) {
+  res.cookie('es_jwt', token, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'strict',
+    maxAge: 90 * 24 * 60 * 60 * 1000, // 90 days — matches JWT expiry
+    path: '/',
+  });
+}
+
 function newToken() {
   return crypto.randomBytes(32).toString('hex');
 }
@@ -66,6 +80,7 @@ router.post('/register', validate(schemas.register), async (req, res, next) => {
     sendEmail({ to: user.email, ...tpl }).catch(e => console.error('verify email send failed:', e));
 
     const token = signToken(user._id);
+    setAuthCookie(res, token);
     res.status(201).json({ token, user: userJson(user) });
   } catch (e) {
     next(e);
@@ -84,6 +99,7 @@ router.post('/login', validate(schemas.login), async (req, res, next) => {
     if (!match) return res.status(401).json({ error: 'Invalid email or password' });
 
     const token = signToken(user._id);
+    setAuthCookie(res, token);
     res.json({ token, user: userJson(user) });
   } catch (e) {
     next(e);
@@ -127,6 +143,7 @@ router.post('/google', async (req, res, next) => {
     }
 
     const token = signToken(user._id);
+    setAuthCookie(res, token);
     res.json({ token, user: userJson(user) });
   } catch (e) {
     next(e);
@@ -209,6 +226,7 @@ router.post('/reset-password', validate(schemas.resetPassword), async (req, res,
     await user.save();
 
     const newJwt = signToken(user._id);
+    setAuthCookie(res, newJwt);
     res.json({ ok: true, token: newJwt, user: userJson(user) });
   } catch (e) {
     next(e);
@@ -280,6 +298,17 @@ router.patch('/profile', auth, async (req, res, next) => {
   } catch (e) {
     next(e);
   }
+});
+
+// POST /api/auth/logout — clear the auth cookie
+router.post('/logout', (req, res) => {
+  res.clearCookie('es_jwt', { httpOnly: true, secure: true, sameSite: 'strict', path: '/' });
+  res.json({ ok: true });
+});
+
+// GET /api/auth/me — verify session and return current user (used on page load to restore session)
+router.get('/me', auth, (req, res) => {
+  res.json({ user: userJson(req.user) });
 });
 
 module.exports = router;
