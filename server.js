@@ -16,6 +16,7 @@ const mongoose = require('mongoose');
 const cors     = require('cors');
 const helmet   = require('helmet');
 const rateLimit = require('express-rate-limit');
+const cookieParser = require('cookie-parser');
 
 const app = express();
 
@@ -67,10 +68,11 @@ app.use(cors({
     if (!origin || allowedOrigins.includes(origin)) cb(null, true);
     else cb(new Error('Not allowed by CORS'));
   },
-  credentials: false,
+  credentials: true,
 }));
 
 app.use(express.json({ limit: '2mb' }));
+app.use(cookieParser());
 
 // ── RATE LIMITING ─────────────────────────────────────────────
 function cfIp(req) {
