@@ -2,11 +2,14 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
 module.exports = async (req, res, next) => {
+  // Prefer httpOnly cookie (browser clients); fall back to Authorization Bearer (API key users)
+  const cookieToken = req.cookies?.es_jwt;
   const header = req.headers.authorization;
-  if (!header || !header.startsWith('Bearer ')) {
+  const token = cookieToken || (header?.startsWith('Bearer ') ? header.slice(7) : null);
+
+  if (!token) {
     return res.status(401).json({ error: 'No token provided' });
   }
-  const token = header.slice(7);
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
     const user = await User.findById(payload.userId).select('-__v');
