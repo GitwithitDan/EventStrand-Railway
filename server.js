@@ -54,7 +54,13 @@ app.use(helmet({
 }));
 
 // ── TRUST PROXY ──────────────────────────────────────────────
-app.set('trust proxy', true);
+// B-3: Use trust proxy: 1 (one hop) rather than trust proxy: true (all hops).
+// With trust proxy: true, Express trusts every X-Forwarded-For entry, which
+// lets anyone hitting Railway directly spoof their IP by sending a crafted
+// CF-Connecting-IP header, bypassing rate limits entirely.
+// With trust proxy: 1, Express only trusts the outermost hop added by Railway's
+// load balancer, giving a reliable req.ip for rate-limit keying.
+app.set('trust proxy', 1);
 
 // ── CORS ─────────────────────────────────────────────────────
 const allowedOrigins = [
@@ -65,8 +71,11 @@ const allowedOrigins = [
 ];
 app.use(cors({
   origin: (origin, cb) => {
+    // B-4: Return cb(null, false) for disallowed origins instead of throwing.
+    // Throwing propagated to the error handler and returned HTTP 500 with a
+    // stack trace logged on every preflight probe from an unrecognised origin.
     if (!origin || allowedOrigins.includes(origin)) cb(null, true);
-    else cb(new Error('Not allowed by CORS'));
+    else cb(null, false);
   },
   credentials: true,
 }));
@@ -75,8 +84,13 @@ app.use(express.json({ limit: '2mb' }));
 app.use(cookieParser());
 
 // ── RATE LIMITING ─────────────────────────────────────────────
+// B-3: Use req.ip (resolved correctly after trust proxy: 1) rather than
+// the spoofable CF-Connecting-IP header. The CF header was useful for
+// getting the real client IP through Cloudflare, but without validating
+// the connecting IP against Cloudflare's published CIDR ranges, any
+// request that reaches Railway directly can set an arbitrary value.
 function cfIp(req) {
-  return req.headers['cf-connecting-ip'] || req.ip;
+  return req.ip;
 }
 
 app.use('/api/auth', rateLimit({
@@ -124,24 +138,25 @@ app.use('/api/apikeys',   require('./routes/apikeys'));
 app.use('/api/directory', require('./routes/directory'));
 
 // ── SSR + SITEMAP ─────────────────────────────────────────────
-// These are mounted at the root so Cloudflare Page Rules can proxy
-// /s/*, /b/*, /p/*, /sitemap.xml, /robots.txt to the backend without
-// path rewriting. The SSR routes match /s/:handle/:strandId etc.
+// B-34: Require ssr once at module load rather than on every request.
+// require() is cached by Node so it was cheap either way, but this is
+// cleaner and avoids the repeated inline require pattern.
+const ssrRouter = require('./routes/ssr');
+
 app.use('/',    require('./routes/sitemap'));
-app.use('/ssr', require('./routes/ssr'));
+app.use('/ssr', ssrRouter);
 // Direct path mounts so Cloudflare can simply forward without a rewrite
 app.use('/s',   (req, res, next) => {
-  // Forward to /ssr/strand internally
   req.url = `/strand${req.url}`;
-  return require('./routes/ssr')(req, res, next);
+  return ssrRouter(req, res, next);
 });
 app.use('/b',   (req, res, next) => {
   req.url = `/braid${req.url}`;
-  return require('./routes/ssr')(req, res, next);
+  return ssrRouter(req, res, next);
 });
 app.use('/p',   (req, res, next) => {
   req.url = `/profile${req.url}`;
-  return require('./routes/ssr')(req, res, next);
+  return ssrRouter(req, res, next);
 });
 
 // ── HEALTH ────────────────────────────────────────────────────
