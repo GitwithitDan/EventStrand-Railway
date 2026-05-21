@@ -1,9 +1,9 @@
-const express  = require('express');
-const router   = express.Router();
-const auth     = require('../middleware/auth');
-const Braid    = require('../models/Braid');
-const Strand   = require('../models/Strand');
-const Workspace = require('../models/Workspace');
+const express    = require('express');
+const router     = express.Router();
+const auth       = require('../middleware/auth');
+const Braid      = require('../models/Braid');
+const Strand     = require('../models/Strand');
+const Workspace  = require('../models/Workspace');
 const Notification = require('../models/Notification');
 const { validate, schemas } = require('../lib/validators');
 
@@ -37,7 +37,7 @@ router.post('/', auth, validate(schemas.braidCreate), async (req, res, next) => 
 });
 
 // PUT /api/braids/:id — update braid
-// If new strands added, notify existing subscribers silently
+// If new strands added, push them into all subscriber workspaces silently.
 router.put('/:id', auth, validate(schemas.braidUpdate), async (req, res, next) => {
   try {
     const braid = await Braid.findOne({ _id: req.params.id, publisher: req.user._id });
@@ -55,30 +55,35 @@ router.put('/:id', auth, validate(schemas.braidUpdate), async (req, res, next) =
     braid.strands = newStrandIds;
     await braid.save();
 
-    // Silently notify subscribers if new strands were added
+    // B-11: Replace nested sequential awaits with parallel execution.
+    // The prior code ran O(subscribers × strands) round-trips serially.
+    // Now: workspace saves run in parallel, and per-strand checks within each
+    // workspace also run in parallel via Promise.all.
     if (added.length && braid.subscriberCount > 0) {
       const workspaces = await Workspace.find({ braids: braid._id }).select('user strands');
-      for (const ws of workspaces) {
-        // Auto-add new strands to subscriber workspaces
-        const toAdd = added.filter(id => !ws.strands.map(s => s.toString()).includes(id));
-        if (toAdd.length) {
-          ws.strands.push(...toAdd);
-          await ws.save();
 
-          // Increment subscriber count for each newly-added strand,
-          // but only if this user didn't already have it in another workspace
-          for (const sid of toAdd) {
-            const alreadyElsewhere = await Workspace.exists({
-              user:    ws.user,
-              _id:     { $ne: ws._id },
-              strands: sid,
-            });
-            if (!alreadyElsewhere) {
-              await Strand.findByIdAndUpdate(sid, { $inc: { subscriberCount: 1 } });
-            }
+      await Promise.all(workspaces.map(async ws => {
+        const wsStrandIds = ws.strands.map(s => s.toString());
+        const toAdd = added.filter(id => !wsStrandIds.includes(id));
+        if (!toAdd.length) return;
+
+        ws.strands.push(...toAdd);
+        await ws.save();
+
+        // Increment subscriberCount for each strand only if this user doesn't
+        // already have it from another workspace (avoid double-counting).
+        await Promise.all(toAdd.map(async sid => {
+          const alreadyElsewhere = await Workspace.exists({
+            user:    ws.user,
+            _id:     { $ne: ws._id },
+            strands: sid,
+          });
+          if (!alreadyElsewhere) {
+            await Strand.findByIdAndUpdate(sid, { $inc: { subscriberCount: 1 } });
           }
-        }
-      }
+        }));
+      }));
+
       const userIds = [...new Set(workspaces.map(w => w.user.toString()))];
       await Notification.insertMany(userIds.map(userId => ({
         user: userId,
