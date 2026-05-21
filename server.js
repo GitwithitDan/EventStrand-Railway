@@ -137,6 +137,8 @@ app.use('/api/qr',        require('./routes/qr'));
 app.use('/api/apikeys',   require('./routes/apikeys'));
 app.use('/api/directory', require('./routes/directory'));
 
+app.use('/api/library',   require('./routes/library'));
+
 // ── SSR + SITEMAP ─────────────────────────────────────────────
 // B-34: Require ssr once at module load rather than on every request.
 // require() is cached by Node so it was cheap either way, but this is
