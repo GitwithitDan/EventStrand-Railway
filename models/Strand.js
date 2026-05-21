@@ -67,6 +67,11 @@ const strandSchema = new mongoose.Schema({
   accessCode:       String,
   published:        { type: Boolean, default: false },
   events:           [eventSchema],
+  // library (EventStrand-curated strands)
+  // Populated only on strands owned by the 'library' publisher account.
+  // Values: 'holiday' | 'sport' | 'cultural' | 'seasonal' | 'personal' | 'general'
+  libraryCategory: String,
+
   // directory
   directoryOptIn:          { type: Boolean, default: false },
   directoryVerificationUrl: String,
