@@ -1,8 +1,8 @@
-const express  = require('express');
-const router   = express.Router();
-const auth     = require('../middleware/auth');
-const Strand   = require('../models/Strand');
-const Workspace = require('../models/Workspace');
+const express    = require('express');
+const router     = express.Router();
+const auth       = require('../middleware/auth');
+const Strand     = require('../models/Strand');
+const Workspace  = require('../models/Workspace');
 const Notification = require('../models/Notification');
 const { validate, schemas } = require('../lib/validators');
 
@@ -43,7 +43,7 @@ router.get('/:id', auth, async (req, res, next) => {
 // POST /api/strands — create new strand
 router.post('/', auth, validate(schemas.strandCreate), async (req, res, next) => {
   try {
-    const { rcal, meta, events, visibility, accessCode } = req.body;
+    const { meta, events, visibility, accessCode } = req.body;
     if (!meta?.title) return res.status(400).json({ error: 'Title is required' });
 
     const strand = await Strand.create({
@@ -90,22 +90,41 @@ router.put('/:id', auth, validate(schemas.strandUpdate), async (req, res, next) 
     if (visibility)              strand.visibility = visibility;
     if (accessCode !== undefined) strand.accessCode = accessCode;
 
+    // B-10: Track whether events meaningfully changed before overwriting them.
+    // Capture the current event _id set so we can diff after the update.
+    // "Meaningful change" = an event was added (new _id) or the count changed.
+    // Meta-only saves (title, description, color, etc.) must NOT notify subscribers.
+    let eventsChanged = false;
     if (events) {
-      // Preserve per-event view counters by matching incoming events to existing
-      // ones by their Mongo _id (present on edits) or falling back to title match
+      const prevIds   = new Set(strand.events.map(e => e._id.toString()));
+      const prevCount = strand.events.length;
+
+      // B-16: Fix title-dedup silently losing the first of two same-titled events.
+      // Build the title fallback Map from the END of the array so the last entry
+      // wins on a duplicate, but use _id matching (more reliable) as the primary key.
       const existingById    = new Map(strand.events.map(e => [e._id.toString(), e]));
-      const existingByTitle = new Map(strand.events.map(e => [e.title?.toLowerCase(), e]));
+      // Reverse-iterate so the first occurrence wins the Map slot
+      const existingByTitle = new Map(
+        [...strand.events].reverse().map(e => [e.title?.toLowerCase(), e])
+      );
 
       strand.events = events.map(e => {
         const prev = (e._id && existingById.get(e._id.toString()))
                   || existingByTitle.get(e.title?.toLowerCase());
         return normaliseEvent(e, prev?.views ?? 0);
       });
+
+      // A new event is one that supplied no _id or supplied an _id we don't recognise
+      const newCount = strand.events.length;
+      eventsChanged  = newCount !== prevCount
+                    || events.some(e => !e._id || !prevIds.has(e._id.toString()));
     }
 
     await strand.save();
 
-    if (strand.published && strand.subscriberCount > 0) {
+    // Only notify when the strand is live and events actually changed.
+    // Typo fixes to titles, color/description edits, etc. don't notify.
+    if (strand.published && strand.subscriberCount > 0 && eventsChanged) {
       await notifySubscribers(strand._id, strand.title,
         `${strand.title} has been updated`);
     }
