@@ -179,7 +179,7 @@ router.get('/strand/:handle/:strandId', async (req, res, next) => {
         Get this strand in your inbox — <a href="${FRONTEND}/#/s/${esc(handle)}/${esc(strandId)}">subscribe on EventStrand</a>.
       </div>`;
 
-    res.set('Cache-Control', 'public, max-age=300, s-maxage=600');
+    res.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=60');
     res.send(shell({ canonical, title, description: desc, ogImage, jsonLd, bodyHtml }));
   } catch (e) { next(e); }
 });
@@ -243,7 +243,7 @@ router.get('/braid/:handle/:braidId', async (req, res, next) => {
         Subscribe once and stay current as new strands are added — <a href="${FRONTEND}/#/b/${esc(handle)}/${esc(braidId)}">open on EventStrand</a>.
       </div>`;
 
-    res.set('Cache-Control', 'public, max-age=300, s-maxage=600');
+    res.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=60');
     res.send(shell({ canonical, title, description: desc, jsonLd, bodyHtml }));
   } catch (e) { next(e); }
 });
@@ -297,7 +297,7 @@ router.get('/profile/:handle', async (req, res, next) => {
         Subscribe to any of these on <a href="${FRONTEND}/#/p/${esc(handle)}">EventStrand</a>.
       </div>`;
 
-    res.set('Cache-Control', 'public, max-age=300, s-maxage=600');
+    res.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=60');
     res.send(shell({ canonical, title, description: desc, jsonLd, bodyHtml }));
   } catch (e) { next(e); }
 });
