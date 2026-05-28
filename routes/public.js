@@ -66,6 +66,7 @@ router.get('/strand/:handle/:strandId', async (req, res, next) => {
       }
     }
 
+    res.set('Cache-Control', 'no-store');
     res.json({ strand, publisherHandle: user.handle });
   } catch (e) { next(e); }
 });
@@ -117,6 +118,7 @@ router.get('/braid/:handle/:braidId', async (req, res, next) => {
       }
     }
 
+    res.set('Cache-Control', 'no-store');
     res.json({ braid: { ...braid.toObject(), publisherHandle: user.handle } });
   } catch (e) { next(e); }
 });
@@ -147,6 +149,7 @@ router.get('/profile/:handle', async (req, res, next) => {
       visibility: 'public',
     }).select('title description subscriberCount').sort({ subscriberCount: -1 });
 
+    res.set('Cache-Control', 'no-store');
     res.json({
       profile: {
         handle:      user.handle,
