@@ -20,6 +20,33 @@ const cookieParser = require('cookie-parser');
 
 const app = express();
 
+// ── CORS ─────────────────────────────────────────────────────
+// Must be registered before helmet so that preflight OPTIONS responses
+// carry the correct Access-Control-* headers. helmet does not interfere
+// with CORS headers directly, but middleware order determines which
+// headers win on OPTIONS requests — CORS headers must be set first.
+const allowedOrigins = [
+  process.env.FRONTEND_URL || 'https://eventstrand.com',
+  'https://www.eventstrand.com',
+  'http://localhost:3000',
+  'http://localhost:8080',
+];
+const corsOptions = {
+  origin: (origin, cb) => {
+    // B-4: Return cb(null, false) for disallowed origins instead of throwing.
+    // Throwing propagated to the error handler and returned HTTP 500 with a
+    // stack trace logged on every preflight probe from an unrecognised origin.
+    if (!origin || allowedOrigins.includes(origin)) cb(null, true);
+    else cb(null, false);
+  },
+  credentials: true,
+};
+// Explicit OPTIONS handler must be registered before rate limiters so that
+// CORS preflights are answered immediately without consuming rate-limit quota
+// or being blocked by Railway's proxy before Express handles them.
+app.options('*', cors(corsOptions));
+app.use(cors(corsOptions));
+
 // ── SECURITY HEADERS ──────────────────────────────────────────
 // CSP rationale:
 //  - 'unsafe-inline' on script-src is required because index.html
@@ -61,24 +88,6 @@ app.use(helmet({
 // With trust proxy: 1, Express only trusts the outermost hop added by Railway's
 // load balancer, giving a reliable req.ip for rate-limit keying.
 app.set('trust proxy', 1);
-
-// ── CORS ─────────────────────────────────────────────────────
-const allowedOrigins = [
-  process.env.FRONTEND_URL || 'https://eventstrand.com',
-  'https://www.eventstrand.com',
-  'http://localhost:3000',
-  'http://localhost:8080',
-];
-app.use(cors({
-  origin: (origin, cb) => {
-    // B-4: Return cb(null, false) for disallowed origins instead of throwing.
-    // Throwing propagated to the error handler and returned HTTP 500 with a
-    // stack trace logged on every preflight probe from an unrecognised origin.
-    if (!origin || allowedOrigins.includes(origin)) cb(null, true);
-    else cb(null, false);
-  },
-  credentials: true,
-}));
 
 app.use(express.json({ limit: '2mb' }));
 app.use(cookieParser());
