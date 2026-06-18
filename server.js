@@ -108,6 +108,7 @@ app.use('/api/auth', rateLimit({
   keyGenerator: cfIp,
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
 }));
 app.use('/api/', rateLimit({
   windowMs: 60 * 1000,
@@ -115,6 +116,7 @@ app.use('/api/', rateLimit({
   keyGenerator: cfIp,
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
 }));
 // SSR pages get a separate, lighter limit — these are public, cacheable, and
 // hit by both crawlers and direct users.
@@ -124,6 +126,7 @@ app.use(['/ssr', '/sitemap.xml', '/robots.txt'], rateLimit({
   keyGenerator: cfIp,
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
 }));
 
 // ── CACHE HEADERS ─────────────────────────────────────────────
