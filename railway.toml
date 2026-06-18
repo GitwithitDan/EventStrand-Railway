@@ -7,3 +7,4 @@ startCommand = "node server.js"
 healthcheckPath = "/health"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
+
