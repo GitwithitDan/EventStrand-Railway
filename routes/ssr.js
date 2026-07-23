@@ -44,6 +44,26 @@ function describeRule(rule) {
 }
 function nth(n) { return ['th','st','nd','rd'][n%100>10 && n%100<14 ? 0 : Math.min(n%10, 4) === 4 ? 0 : n%10]; }
 
+// Full schedule description for an event: one-off date, all recurrence
+// rules joined (rules are additive), plus curated dates[] if present.
+function describeSchedule(ev) {
+  if (ev.date) return esc(ev.date);
+  const parts = [];
+  if (ev.recurrence?.length) {
+    const ruleDescs = ev.recurrence.map(describeRule).filter(Boolean);
+    if (ruleDescs.length) parts.push(esc(ruleDescs.join(' + ')));
+  }
+  if (ev.dates?.length) {
+    if (ev.recurrence?.length) {
+      parts.push(`+${ev.dates.length} extra date${ev.dates.length !== 1 ? 's' : ''}`);
+    } else {
+      const sorted = ev.dates.filter(d => d.date).map(d => d.date).sort();
+      if (sorted.length) parts.push(`Next: ${esc(sorted[0])}${sorted.length > 1 ? ` (+${sorted.length - 1} more)` : ''}`);
+    }
+  }
+  return parts.join(' · ');
+}
+
 // Page shell — used by every SSR response
 function shell({ canonical, title, description, ogImage, jsonLd, bodyHtml }) {
   const safeTitle = esc(title);
@@ -145,12 +165,11 @@ router.get('/strand/:handle/:strandId', async (req, res, next) => {
 
     const events = (strand.events || []).slice(0, 30);
     const eventsHtml = events.length ? events.map(ev => {
-      const recur = describeRule(ev.recurrence?.[0]);
-      const when  = ev.date ? esc(ev.date) : recur;
+      const when = describeSchedule(ev);
       return `
         <div class="event">
           <div class="event-title">${esc(ev.title || strand.title)}</div>
-          <div class="event-meta">${esc(when || '')}${ev.time_start ? ` · ${esc(ev.time_start)}` : ''}${ev.price && ev.price !== 'free' ? ` · ${esc(ev.price)}` : ''}</div>
+          <div class="event-meta">${when || ''}${ev.time_start ? ` · ${esc(ev.time_start)}` : ''}${ev.price && ev.price !== 'free' ? ` · ${esc(ev.price)}` : ''}</div>
           ${ev.notes ? `<div style="margin-top:6px;color:#C5CCEA;font-size:14px;">${esc(ev.notes)}</div>` : ''}
         </div>`;
     }).join('') : '<p style="color:#8290C0;">No events scheduled yet.</p>';
