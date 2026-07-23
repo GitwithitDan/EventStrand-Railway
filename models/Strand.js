@@ -6,6 +6,7 @@ const ruleSchema = new mongoose.Schema({
   days:       [String],
   time_start: String,
   time_end:   String,
+  all_day:    { type: Boolean, default: false },
   month_week: String,
   month_date: Number,
   season_start: String,
@@ -24,6 +25,7 @@ const dateEntrySchema = new mongoose.Schema({
   date:       String,
   time_start: String,
   time_end:   String,
+  all_day:    { type: Boolean, default: false },
   note:       String,
 }, { _id: false });
 
@@ -42,8 +44,10 @@ const eventSchema = new mongoose.Schema({
   date:         String,
   time_start:   String,
   time_end:     String,
-  // datelist
-  date_list:    [dateEntrySchema],
+  all_day:      { type: Boolean, default: false },
+  // curated dates — sole schedule for Date List events, or extra dates
+  // coexisting with recurrence[] on Recurring events (spec dates[])
+  dates:        [dateEntrySchema],
   // recurring
   recurrence:   [ruleSchema],
   exceptions:   [exceptionSchema],
