@@ -183,6 +183,7 @@ router.get('/:id/analytics', auth, async (req, res, next) => {
 
 // Normalise incoming event data from .rcal format, preserving existing view count
 function normaliseEvent(e, existingViews) {
+  const dates = e.dates || [];
   return {
     title:          e.title,
     category:       e.category,
@@ -192,11 +193,12 @@ function normaliseEvent(e, existingViews) {
     ticket_url:     e.ticket_url,
     lead_time_days: e.lead_time_days || 0,
     notes:          e.notes,
-    event_type:     e.date ? 'oneoff' : e.date_list?.length ? 'datelist' : 'recurring',
+    event_type:     e.date ? 'oneoff' : e.recurrence?.length ? 'recurring' : dates.length ? 'datelist' : 'recurring',
     date:           e.date,
     time_start:     e.time_start,
     time_end:       e.time_end,
-    date_list:      e.date_list || [],
+    all_day:        e.all_day || false,
+    dates:          dates,
     recurrence:     e.recurrence || [],
     exceptions:     e.exceptions || [],
     views:          existingViews ?? e.views ?? 0,
