@@ -1,8 +1,10 @@
-const express = require('express');
-const router  = express.Router();
-const Strand  = require('../models/Strand');
-const Braid   = require('../models/Braid');
-const User    = require('../models/User');
+const express      = require('express');
+const router       = express.Router();
+const Strand       = require('../models/Strand');
+const Braid        = require('../models/Braid');
+const User         = require('../models/User');
+const Workspace    = require('../models/Workspace');
+const optionalAuth = require('../middleware/optionalAuth');
 
 // Escape user input for safe use in a MongoDB $regex query
 function escapeRegex(str) {
@@ -10,7 +12,7 @@ function escapeRegex(str) {
 }
 
 // GET /api/public/strand/:handle/:strandId
-router.get('/strand/:handle/:strandId', async (req, res, next) => {
+router.get('/strand/:handle/:strandId', optionalAuth, async (req, res, next) => {
   try {
     const { handle, strandId } = req.params;
 
@@ -66,8 +68,16 @@ router.get('/strand/:handle/:strandId', async (req, res, next) => {
       }
     }
 
+    // If the request came from a signed-in user, tell the frontend whether
+    // they already subscribe to this strand in any workspace, so the public
+    // strand page can render "Subscribed" instead of always showing "Subscribe".
+    let subscribed = false;
+    if (req.user) {
+      subscribed = await Workspace.exists({ user: req.user._id, strands: strand._id });
+    }
+
     res.set('Cache-Control', 'no-store');
-    res.json({ strand, publisherHandle: user.handle });
+    res.json({ strand, publisherHandle: user.handle, subscribed: !!subscribed });
   } catch (e) { next(e); }
 });
 
