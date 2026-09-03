@@ -22,6 +22,9 @@ router.post('/', auth, validate(schemas.braidCreate), async (req, res, next) => 
   try {
     const { title, description, strandIds, visibility, accessCode } = req.body;
     if (!title) return res.status(400).json({ error: 'Title required' });
+    if (visibility === 'protected' && (!accessCode || !accessCode.trim())) {
+      return res.status(400).json({ error: 'Set a passcode before creating a protected braid' });
+    }
 
     const braid = await Braid.create({
       publisher:       req.user._id,
