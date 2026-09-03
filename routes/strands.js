@@ -139,6 +139,20 @@ router.post('/:id/publish', auth, async (req, res, next) => {
     const strand = await Strand.findOne({ _id: req.params.id, publisher: req.user._id });
     if (!strand) return res.status(404).json({ error: 'Strand not found' });
     if (!req.user.handle) return res.status(400).json({ error: 'Set a handle before publishing' });
+
+    // B-QA10/13: A strand used to be publishable with 0 events, and a
+    // Protected strand could go live with no passcode set — both silently.
+    // Require the minimum a subscriber-facing strand needs before it can go live.
+    if (!strand.title || !strand.title.trim()) {
+      return res.status(400).json({ error: 'Add a strand title before publishing' });
+    }
+    if (!strand.events || strand.events.length === 0) {
+      return res.status(400).json({ error: 'Add at least one event before publishing' });
+    }
+    if (strand.visibility === 'protected' && (!strand.accessCode || !strand.accessCode.trim())) {
+      return res.status(400).json({ error: 'Set a passcode before publishing a protected strand' });
+    }
+
     strand.published = true;
     strand.publisherHandle = req.user.handle;
     await strand.save();
