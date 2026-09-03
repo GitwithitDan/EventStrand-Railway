@@ -19,6 +19,12 @@ const userSchema = new mongoose.Schema({
   // ── PASSWORD RESET ────────────────────────────────────────
   resetToken:           { type: String, default: null, select: false },
   resetTokenExpires:    { type: Date,   default: null, select: false },
+
+  // ── LOGIN LOCKOUT (B-QA7) ──────────────────────────────────
+  // Per-account failed-attempt counter, separate from the IP-level rate
+  // limiter in server.js. Reset to 0 on any successful login.
+  failedLoginAttempts:  { type: Number, default: 0, select: false },
+  lockUntil:            { type: Date,   default: null, select: false },
 }, { timestamps: true });
 
 userSchema.index({ previousHandles: 1 });
