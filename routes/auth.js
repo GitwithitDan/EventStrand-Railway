@@ -25,6 +25,12 @@ const RESERVED_HANDLES = [
 const VERIFY_TTL_MS = 24 * 60 * 60 * 1000;        // 24 hours
 const RESET_TTL_MS  = 60 * 60 * 1000;             // 1 hour
 
+// B-QA7: Per-account login lockout, on top of the IP-level rate limiter in
+// server.js. The IP limiter alone gave no visible feedback and doesn't stop
+// repeated guesses against one account from a rotating/shared IP.
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOGIN_LOCK_MS      = 15 * 60 * 1000;         // 15 minutes
+
 function signToken(userId) {
   return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: '90d' });
 }
@@ -124,11 +130,40 @@ router.post('/login', validate(schemas.login), async (req, res, next) => {
   try {
     const { email, password } = req.body;
 
-    const user = await User.findOne({ email: email.toLowerCase() });
+    const user = await User.findOne({ email: email.toLowerCase() })
+      .select('+failedLoginAttempts +lockUntil');
+    // Don't reveal whether the email exists — same generic message as a bad password.
     if (!user || !user.passwordHash) return res.status(401).json({ error: 'Invalid email or password' });
 
+    if (user.lockUntil && user.lockUntil > new Date()) {
+      const minutesLeft = Math.ceil((user.lockUntil - new Date()) / 60000);
+      return res.status(423).json({
+        error: `Too many failed attempts. Try again in ${minutesLeft} minute${minutesLeft === 1 ? '' : 's'}.`,
+      });
+    }
+
     const match = await bcrypt.compare(password, user.passwordHash);
-    if (!match) return res.status(401).json({ error: 'Invalid email or password' });
+    if (!match) {
+      user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
+      if (user.failedLoginAttempts >= MAX_LOGIN_ATTEMPTS) {
+        user.lockUntil = new Date(Date.now() + LOGIN_LOCK_MS);
+        user.failedLoginAttempts = 0;
+        await user.save();
+        return res.status(423).json({ error: 'Too many failed attempts. Try again in 15 minutes.' });
+      }
+      await user.save();
+      const remaining = MAX_LOGIN_ATTEMPTS - user.failedLoginAttempts;
+      return res.status(401).json({
+        error: `Invalid email or password. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`,
+      });
+    }
+
+    // Successful login — clear any accumulated failures.
+    if (user.failedLoginAttempts || user.lockUntil) {
+      user.failedLoginAttempts = 0;
+      user.lockUntil = null;
+      await user.save();
+    }
 
     const token = signToken(user._id);
     setAuthCookie(res, token);
