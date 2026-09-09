@@ -8,7 +8,11 @@ const userSchema = new mongoose.Schema({
   picture:         { type: String, default: '' },
   handle:          { type: String, unique: true, sparse: true, lowercase: true, trim: true },
   accountType:     { type: String, enum: ['personal', 'venue'], default: 'personal' },
-  // Handle history — old handles redirect to current
+  // Handle history — old handles redirect to current.
+  // Capped at the last 10 (see routes/auth.js set-handle) — a handle that
+  // ages out of this list stops redirecting and starts 404ing. Anything
+  // printed on physical QR codes (venue signage, flyers) should account
+  // for that ceiling if a venue renames frequently.
   previousHandles: [{ type: String, lowercase: true }],
 
   // ── EMAIL VERIFICATION ────────────────────────────────────
