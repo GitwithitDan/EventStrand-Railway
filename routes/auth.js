@@ -352,6 +352,10 @@ router.post('/set-handle', auth, async (req, res, next) => {
 
     const oldHandle = req.user.handle;
     if (oldHandle && oldHandle !== lower) {
+      // Only the most recent 10 old handles keep redirecting (see
+      // models/User.js previousHandles). Beyond that, an old link 404s
+      // instead of resolving — this is the one durability limit on
+      // "change your handle without breaking existing links."
       if (!req.user.previousHandles.includes(oldHandle)) {
         req.user.previousHandles.push(oldHandle);
         if (req.user.previousHandles.length > 10) {
