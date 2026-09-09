@@ -114,12 +114,23 @@ function shell({ canonical, title, description, ogImage, jsonLd, bodyHtml }) {
     .ssr-content .strand-link { display: inline-block; padding: 6px 12px; background: rgba(108,143,255,0.14); border-radius: 8px; color: #6C8FFF; text-decoration: none; font-size: 14px; margin: 4px 6px 4px 0; }
     .ssr-content .footer { margin-top: 48px; color: #8290C0; font-size: 13px; }
     .ssr-content .footer a { font-weight: 600; }
+    .site-footer { max-width: 760px; margin: 0 auto; padding: 0 24px 40px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; border-top: 1px solid rgba(100,120,255,0.18); padding-top: 20px; }
+    .site-footer, .site-footer a { color: #7882B8; font-size: 12px; text-decoration: none; }
+    .site-footer .site-footer-links { display: flex; gap: 20px; }
   </style>
 </head>
 <body>
   <main class="ssr-content" id="ssr-content">
     ${bodyHtml}
   </main>
+
+  <footer class="site-footer">
+    <div>© 2026 EventStrand</div>
+    <div class="site-footer-links">
+      <a href="${FRONTEND}/privacy-policy.html">Privacy Policy</a>
+      <a href="${FRONTEND}/terms-of-service.html">Terms of Service</a>
+    </div>
+  </footer>
 
   <!-- ── SPA HYDRATION ─────────────────────────────────────────
        app.js's hash router falls back to window.location.pathname
