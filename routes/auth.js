@@ -70,6 +70,7 @@ function userJson(u, extras = {}) {
     handle:        u.handle || null,
     accountType:   u.accountType,
     emailVerified: u.emailVerified,
+    isAdmin:       !!u.isAdmin,
     ...extras,
   };
 }
