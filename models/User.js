@@ -8,6 +8,10 @@ const userSchema = new mongoose.Schema({
   picture:         { type: String, default: '' },
   handle:          { type: String, unique: true, sparse: true, lowercase: true, trim: true },
   accountType:     { type: String, enum: ['personal', 'venue'], default: 'personal' },
+  // Moderation access. Deliberately NOT settable through any API route —
+  // only ever flipped by hand in the database. That means there is no code
+  // path anywhere in the app that can grant admin access.
+  isAdmin:         { type: Boolean, default: false },
   // Handle history — old handles redirect to current.
   // Capped at the last 10 (see routes/auth.js set-handle) — a handle that
   // ages out of this list stops redirecting and starts 404ing. Anything
