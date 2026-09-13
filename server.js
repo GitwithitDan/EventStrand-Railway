@@ -128,6 +128,17 @@ app.use(['/ssr', '/sitemap.xml', '/robots.txt'], rateLimit({
   legacyHeaders: false,
   validate: { xForwardedForHeader: false },
 }));
+// Admin routes get a tighter limit than the general /api/ bucket, on top of
+// the requireAdmin gate itself — slows any automated attempt against the
+// surface before it even gets a shot at a real session.
+app.use('/api/admin', rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  keyGenerator: cfIp,
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
+}));
 
 // ── CACHE HEADERS ─────────────────────────────────────────────
 app.use('/api', (req, res, next) => {
@@ -140,6 +151,7 @@ app.use('/api', (req, res, next) => {
 // ── ROUTES ────────────────────────────────────────────────────
 app.use('/api/auth',      require('./routes/auth'));
 app.use('/api/strands',   require('./routes/strands'));
+app.use('/api/strands',   require('./routes/reports'));
 app.use('/api/braids',    require('./routes/braids'));
 app.use('/api/user',      require('./routes/user'));
 app.use('/api/user',      require('./routes/interested'));
@@ -148,6 +160,7 @@ app.use('/api/public',    require('./routes/public'));
 app.use('/api/qr',        require('./routes/qr'));
 app.use('/api/apikeys',   require('./routes/apikeys'));
 app.use('/api/directory', require('./routes/directory'));
+app.use('/api/admin',     require('./routes/admin'));
 
 app.use('/api/library',   require('./routes/library'));
 
