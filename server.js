@@ -17,6 +17,7 @@ const cors     = require('cors');
 const helmet   = require('helmet');
 const rateLimit = require('express-rate-limit');
 const cookieParser = require('cookie-parser');
+const { alertOps } = require('./lib/alerts');
 
 const app = express();
 
@@ -150,6 +151,7 @@ app.use('/api', (req, res, next) => {
 
 // ── ROUTES ────────────────────────────────────────────────────
 app.use('/api/auth',      require('./routes/auth'));
+app.use('/api/avatar',    require('./routes/avatar'));
 app.use('/api/strands',   require('./routes/strands'));
 app.use('/api/strands',   require('./routes/reports'));
 app.use('/api/braids',    require('./routes/braids'));
@@ -187,18 +189,68 @@ app.use('/p',   (req, res, next) => {
 });
 
 // ── HEALTH ────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
+// Reports the DATABASE, not just the process. Returns 503 when MongoDB is
+// unreachable or rejecting credentials, so Railway's deploy healthcheck
+// refuses to promote a deploy with a bad MONGODB_URI and an uptime monitor
+// pointed at this URL sees the outage.
+async function dbIsUp() {
+  if (mongoose.connection.readyState !== 1) return false;
+  try {
+    await Promise.race([
+      mongoose.connection.db.collection('users').findOne({}, { projection: { _id: 1 } }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('db health timeout')), 3000)),
+    ]);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+app.get('/health', async (req, res) => {
+  const up = await dbIsUp();
+  res.set('Cache-Control', 'no-store');
+  res.status(up ? 200 : 503).json({ ok: up, db: up ? 'up' : 'down', ts: Date.now() });
+});
 
 // ── ERROR HANDLER ─────────────────────────────────────────────
+// Never send raw internal error text (database errors, stack details) to
+// the browser. 4xx errors we raised on purpose keep their message; everything
+// else gets a generic message and the real error goes to the logs.
+function isDbError(err) {
+  const n = String(err?.name || '');
+  return n.startsWith('Mongo') || n === 'MongooseServerSelectionError' || n === 'MongooseError';
+}
 app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(err.status || 500).json({ error: err.message || 'Server error' });
+  console.error(err.stack || err);
+  if (res.headersSent) return next(err);
+
+  if (isDbError(err)) {
+    alertOps('db-error', 'Database error on a live request', `${err.name}: ${err.message}`);
+    return res.status(503).json({ error: 'EventStrand is having trouble right now. Please try again in a few minutes.' });
+  }
+  if (err.name === 'CastError' || err.name === 'ValidationError') {
+    return res.status(400).json({ error: 'Invalid request' });
+  }
+  const status = err.status || err.statusCode || 500;
+  if (status >= 400 && status < 500) {
+    return res.status(status).json({ error: err.message || 'Bad request' });
+  }
+  res.status(500).json({ error: 'Something went wrong. Please try again.' });
 });
 
 // ── DATABASE + START ──────────────────────────────────────────
-mongoose.connect(process.env.MONGODB_URI)
+mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 8000 })
   .then(() => {
     console.log('MongoDB connected');
+
+    // Watchdog: ping the database every minute; email ALERT_EMAIL on the
+    // first failure and again on recovery (see lib/alerts.js).
+    let dbWasUp = true;
+    setInterval(async () => {
+      const up = await dbIsUp();
+      if (!up && dbWasUp) alertOps('db-down', 'Database is DOWN', 'Health ping to MongoDB failed. Check MONGODB_URI in Railway and the database user in Atlas.');
+      if (up && !dbWasUp) alertOps('db-up', 'Database recovered', 'Health ping to MongoDB is succeeding again.');
+      dbWasUp = up;
+    }, 60 * 1000).unref();
     const PORT = process.env.PORT || 3000;
     const server = app.listen(PORT, () => console.log(`EventStrand API running on port ${PORT}`));
 

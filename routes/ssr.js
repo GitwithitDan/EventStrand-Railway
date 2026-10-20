@@ -16,6 +16,30 @@ const User    = require('../models/User');
 
 const FRONTEND = process.env.FRONTEND_URL || 'https://eventstrand.com';
 
+// ── LAST-GOOD-PAGE FALLBACK ──────────────────────────────────
+// Remembers the most recent successful (200) HTML for each public page in
+// memory. If the database is unreachable when a page is requested, the
+// remembered copy is served instead of an error, so published strand/QR
+// links keep working through a database outage. The cache is per-process:
+// it is empty after a restart/redeploy and fills as pages are visited.
+const LAST_GOOD_MAX = 500;
+const lastGood = new Map();
+
+router.use((req, res, next) => {
+  if (req.method !== 'GET') return next();
+  const key = req.originalUrl.split('?')[0];
+  const origSend = res.send.bind(res);
+  res.send = (body) => {
+    if (res.statusCode === 200 && typeof body === 'string') {
+      lastGood.delete(key);
+      lastGood.set(key, body);
+      if (lastGood.size > LAST_GOOD_MAX) lastGood.delete(lastGood.keys().next().value);
+    }
+    return origSend(body);
+  };
+  next();
+});
+
 // HTML escape — for everything we drop into the page
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({
@@ -209,7 +233,7 @@ router.get('/strand/:handle/:strandId', async (req, res, next) => {
         Get this strand in your inbox — <a href="${FRONTEND}/#/s/${esc(handle)}/${esc(strandId)}">subscribe on EventStrand</a>.
       </div>`;
 
-    res.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=60');
+    res.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=60, stale-if-error=86400');
     res.send(shell({ canonical, title, description: desc, ogImage, jsonLd, bodyHtml }));
   } catch (e) { next(e); }
 });
@@ -273,7 +297,7 @@ router.get('/braid/:handle/:braidId', async (req, res, next) => {
         Subscribe once and stay current as new strands are added — <a href="${FRONTEND}/#/b/${esc(handle)}/${esc(braidId)}">open on EventStrand</a>.
       </div>`;
 
-    res.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=60');
+    res.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=60, stale-if-error=86400');
     res.send(shell({ canonical, title, description: desc, jsonLd, bodyHtml }));
   } catch (e) { next(e); }
 });
@@ -327,7 +351,7 @@ router.get('/profile/:handle', async (req, res, next) => {
         Subscribe to any of these on <a href="${FRONTEND}/#/p/${esc(handle)}">EventStrand</a>.
       </div>`;
 
-    res.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=60');
+    res.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=60, stale-if-error=86400');
     res.send(shell({ canonical, title, description: desc, jsonLd, bodyHtml }));
   } catch (e) { next(e); }
 });
@@ -349,5 +373,25 @@ function passcodeGatePage({ canonical, title }) {
     bodyHtml: `<h1>Passcode required</h1><p class="desc">This strand is protected. Open it on <a href="${esc(canonical)}#">EventStrand</a> and enter the passcode to view.</p>`,
   });
 }
+
+// Router-level error handler: serve the last good copy if we have one,
+// otherwise a friendly page — never a raw JSON/DB error.
+router.use((err, req, res, next) => {
+  console.error('[ssr]', err.stack || err);
+  if (res.headersSent) return next(err);
+  const key = req.originalUrl.split('?')[0];
+  const cached = lastGood.get(key);
+  res.set('Cache-Control', 'no-store');
+  if (cached) {
+    res.set('X-Served-Stale', '1');
+    return res.status(200).type('html').send(cached);
+  }
+  res.status(503).type('html').send(shell({
+    canonical: FRONTEND,
+    title: 'Temporarily unavailable · EventStrand',
+    description: 'EventStrand is having trouble right now.',
+    bodyHtml: `<h1>Temporarily unavailable</h1><p class="desc">EventStrand is having trouble right now. Please try again in a few minutes.</p><div class="footer"><a href="${FRONTEND}/">Back to EventStrand</a></div>`,
+  }));
+});
 
 module.exports = router;

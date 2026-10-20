@@ -8,19 +8,13 @@ const User     = require('../models/User');
 const auth     = require('../middleware/auth');
 const { validate, schemas } = require('../lib/validators');
 const { sendEmail, verifyEmailTemplate, resetPasswordTemplate } = require('../lib/email');
+const optionalAuth = require('../middleware/optionalAuth');
+const { HANDLE_RE, RESERVED_HANDLES, cooldownDays, handleChangeableAt, isHandleAvailable } = require('../lib/handles');
 
 if (!process.env.GOOGLE_CLIENT_ID) throw new Error('GOOGLE_CLIENT_ID env var is required');
 if (!process.env.JWT_SECRET)       throw new Error('JWT_SECRET env var is required');
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
-
-// B-28: Added missing reserved paths that the server actually serves.
-const RESERVED_HANDLES = [
-  'admin','api','app','eventstrand','www','support','help','static','assets',
-  's','b','p','spec','verify','reset-password','forgot-password','sitemap',
-  'health','ssr','qr','dashboard','notifications','analytics','account',
-  'subscriptions','interested','directory','developers',
-];
 
 const VERIFY_TTL_MS = 24 * 60 * 60 * 1000;        // 24 hours
 const RESET_TTL_MS  = 60 * 60 * 1000;             // 1 hour
@@ -67,7 +61,10 @@ function userJson(u, extras = {}) {
     email:         u.email,
     displayName:   u.displayName,
     picture:       u.picture,
+    pictureSource: u.pictureSource || '',
     handle:        u.handle || null,
+    handleChangeableAt: handleChangeableAt(u),
+    handleCooldownDays: cooldownDays(),
     accountType:   u.accountType,
     emailVerified: u.emailVerified,
     isAdmin:       !!u.isAdmin,
@@ -200,6 +197,7 @@ router.post('/google', async (req, res, next) => {
           email: normEmail,
           displayName: name,
           picture,
+          pictureSource: picture ? 'google' : '',
           emailVerified: !!email_verified,
         });
       } catch (createErr) {
@@ -216,7 +214,11 @@ router.post('/google', async (req, res, next) => {
       }
     } else {
       user.googleId    = googleId;
-      user.picture     = picture || user.picture;
+      // Never overwrite a photo the user uploaded themselves.
+      if (user.pictureSource !== 'upload' && picture) {
+        user.picture       = picture;
+        user.pictureSource = 'google';
+      }
       user.displayName = user.displayName || name;
       // Trust Google's email verification — promote local account if Google says so
       if (email_verified && !user.emailVerified) user.emailVerified = true;
@@ -319,59 +321,81 @@ router.post('/reset-password', validate(schemas.resetPassword), async (req, res,
 });
 
 // GET /api/auth/check-handle?handle=xxx
-router.get('/check-handle', async (req, res, next) => {
+// Public. If the caller is signed in, their own current/previous handles
+// count as available to them.
+router.get('/check-handle', optionalAuth, async (req, res, next) => {
   try {
     const { handle } = req.query;
-    if (!handle || !/^[a-zA-Z0-9_-]{3,30}$/.test(handle)) {
+    if (!handle || !HANDLE_RE.test(handle)) {
       return res.status(400).json({ error: 'Invalid handle format' });
     }
-    if (RESERVED_HANDLES.includes(handle.toLowerCase())) {
-      return res.json({ available: false });
-    }
-    const exists = await User.findOne({ handle: handle.toLowerCase() });
-    res.json({ available: !exists });
+    const lower = handle.toLowerCase();
+    if (req.user && req.user.handle === lower) return res.json({ available: true, own: true });
+    res.json({ available: await isHandleAvailable(lower, req.user?._id) });
   } catch (e) {
     next(e);
   }
 });
 
 // POST /api/auth/set-handle
+// Rules live in lib/handles.js: format, reserved words, uniqueness across
+// current + previous handles, change cooldown, permanent redirects.
 router.post('/set-handle', auth, async (req, res, next) => {
   try {
     const { handle } = req.body;
-    if (!handle || !/^[a-zA-Z0-9_-]{3,30}$/.test(handle)) {
-      return res.status(400).json({ error: 'Invalid handle format' });
+    if (!handle || !HANDLE_RE.test(handle)) {
+      return res.status(400).json({ error: 'Handles are 3–30 characters: letters, numbers, - and _ only' });
     }
-    const lower = handle.toLowerCase();
+    const lower     = handle.toLowerCase();
+    const oldHandle = req.user.handle;
+
+    // No-op: same handle
+    if (oldHandle === lower) {
+      return res.json({ ok: true, handle: lower, handleChangeableAt: handleChangeableAt(req.user) });
+    }
 
     if (RESERVED_HANDLES.includes(lower)) {
       return res.status(400).json({ error: 'That handle is reserved' });
     }
 
-    const taken = await User.findOne({ handle: lower, _id: { $ne: req.user._id } });
-    if (taken) return res.status(409).json({ error: 'Handle already taken' });
+    // Cooldown applies to changes only — the first handle is always free to set.
+    const waitUntil = oldHandle ? handleChangeableAt(req.user) : null;
+    if (waitUntil) {
+      return res.status(429).json({
+        error: `You can change your handle again on ${waitUntil.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })}`,
+        handleChangeableAt: waitUntil,
+      });
+    }
 
-    const oldHandle = req.user.handle;
-    if (oldHandle && oldHandle !== lower) {
-      // Only the most recent 10 old handles keep redirecting (see
-      // models/User.js previousHandles). Beyond that, an old link 404s
-      // instead of resolving — this is the one durability limit on
-      // "change your handle without breaking existing links."
-      if (!req.user.previousHandles.includes(oldHandle)) {
-        req.user.previousHandles.push(oldHandle);
-        if (req.user.previousHandles.length > 10) {
-          req.user.previousHandles = req.user.previousHandles.slice(-10);
-        }
-      }
+    if (!(await isHandleAvailable(lower, req.user._id))) {
+      return res.status(409).json({ error: 'Handle already taken' });
+    }
+
+    if (oldHandle) {
+      // Old handle keeps redirecting forever (no cap) and stays reserved.
+      if (!req.user.previousHandles.includes(oldHandle)) req.user.previousHandles.push(oldHandle);
+      // Taking back one of your own previous handles: it is current again.
+      req.user.previousHandles = req.user.previousHandles.filter(h => h !== lower);
+      req.user.handleChangedAt = new Date();
+    }
+
+    req.user.handle = lower;
+    try {
+      await req.user.save();
+    } catch (saveErr) {
+      // Unique index lost a race with a concurrent claim
+      if (saveErr.code === 11000) return res.status(409).json({ error: 'Handle already taken' });
+      throw saveErr;
+    }
+
+    if (oldHandle) {
       const Strand = require('../models/Strand');
       const Braid  = require('../models/Braid');
       await Strand.updateMany({ publisher: req.user._id }, { publisherHandle: lower });
       await Braid.updateMany({ publisher: req.user._id }, { publisherHandle: lower });
     }
 
-    req.user.handle = lower;
-    await req.user.save();
-    res.json({ ok: true, handle: lower });
+    res.json({ ok: true, handle: lower, handleChangeableAt: handleChangeableAt(req.user) });
   } catch (e) {
     next(e);
   }
@@ -381,7 +405,11 @@ router.post('/set-handle', auth, async (req, res, next) => {
 router.patch('/profile', auth, async (req, res, next) => {
   try {
     const { displayName } = req.body;
-    if (displayName) req.user.displayName = displayName.trim().slice(0, 60);
+    if (typeof displayName === 'string') {
+      const name = displayName.trim().slice(0, 60);
+      if (!name) return res.status(400).json({ error: 'Display name cannot be empty' });
+      req.user.displayName = name;
+    }
     await req.user.save();
     res.json({ ok: true });
   } catch (e) {
