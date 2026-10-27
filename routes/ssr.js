@@ -125,7 +125,15 @@ function shell({ canonical, title, description, ogImage, jsonLd, bodyHtml }) {
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,600;0,9..144,700;1,9..144,300;1,9..144,400&family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
   <style>
-    body { margin: 0; font-family: 'Outfit', sans-serif; background: #04061a; color: #ECF0FF; }
+    body { margin: 0; padding-top: 64px; font-family: 'Outfit', sans-serif; background: #04061a; color: #ECF0FF; }
+    .ssr-nav { position: fixed; top: 0; left: 0; right: 0; z-index: 250; display: flex; align-items: center; justify-content: space-between; padding: 0 40px; height: 64px; box-sizing: border-box; background: rgba(4,6,26,0.90); backdrop-filter: blur(20px); border-bottom: 1px solid rgba(100,120,255,0.18); }
+    .ssr-nav-logo { display: flex; align-items: center; gap: 10px; text-decoration: none; color: #ECF0FF; font-family: 'Fraunces', serif; font-size: 20px; font-weight: 600; }
+    .ssr-nav-logo img { width: 32px; height: 32px; border-radius: 8px; object-fit: cover; }
+    .ssr-nav-links { display: flex; align-items: center; gap: 8px; }
+    .ssr-nav-links a { color: #8290C0; text-decoration: none; font-size: 14px; font-weight: 500; padding: 6px 14px; border-radius: 8px; }
+    .ssr-nav-links a:hover { color: #ECF0FF; background: rgba(108,143,255,0.14); }
+    .ssr-nav-links a.ssr-nav-cta { color: #fff; background: #6C8FFF; font-weight: 600; }
+    @media (max-width: 900px) { .ssr-nav { padding: 0 20px; } .ssr-nav-links a:not(.ssr-nav-cta) { display: none; } }
     .ssr-content { max-width: 760px; margin: 0 auto; padding: 56px 24px; }
     .ssr-content a { color: #6C8FFF; }
     .ssr-content h1 { font-family: 'Fraunces', serif; font-weight: 600; font-size: 36px; line-height: 1.15; margin: 0 0 12px; }
@@ -144,6 +152,19 @@ function shell({ canonical, title, description, ogImage, jsonLd, bodyHtml }) {
   </style>
 </head>
 <body>
+  <nav class="ssr-nav">
+    <a class="ssr-nav-logo" href="${FRONTEND}/"><img src="${FRONTEND}/icon-192.png" alt="EventStrand"><span>EventStrand</span></a>
+    <div class="ssr-nav-links">
+      <a href="${FRONTEND}/#concept">About</a>
+      <a href="${FRONTEND}/#how">How It Works</a>
+      <a href="${FRONTEND}/#builder">Builder</a>
+      <a href="${FRONTEND}/#library">Library</a>
+      <a href="${FRONTEND}/#venue-guides">Venue Guides</a>
+      <a href="${FRONTEND}/#directory">Directory</a>
+      <a href="${FRONTEND}/#developer">Developers</a>
+      <a class="ssr-nav-cta" href="${FRONTEND}/#/dashboard">Open App</a>
+    </div>
+  </nav>
   <main class="ssr-content" id="ssr-content">
     ${bodyHtml}
   </main>
