@@ -132,8 +132,10 @@ function shell({ canonical, title, description, ogImage, jsonLd, bodyHtml }) {
     .ssr-nav-links { display: flex; align-items: center; gap: 8px; }
     .ssr-nav-links a { color: #8290C0; text-decoration: none; font-size: 14px; font-weight: 500; padding: 6px 14px; border-radius: 8px; }
     .ssr-nav-links a:hover { color: #ECF0FF; background: rgba(108,143,255,0.14); }
+    .ssr-nav-links a.ssr-nav-btn { color: #8290C0; border: 1px solid rgba(100,120,255,0.32); font-weight: 600; margin-left: 8px; }
+    .ssr-nav-links a.ssr-nav-btn:hover { color: #ECF0FF; border-color: #6C8FFF; }
     .ssr-nav-links a.ssr-nav-cta { color: #fff; background: #6C8FFF; font-weight: 600; }
-    @media (max-width: 900px) { .ssr-nav { padding: 0 20px; } .ssr-nav-links a:not(.ssr-nav-cta) { display: none; } }
+    @media (max-width: 900px) { .ssr-nav { padding: 0 20px; } .ssr-nav-links a:not(.ssr-nav-cta):not(.ssr-nav-btn) { display: none; } }
     .ssr-content { max-width: 760px; margin: 0 auto; padding: 56px 24px; }
     .ssr-content a { color: #6C8FFF; }
     .ssr-content h1 { font-family: 'Fraunces', serif; font-weight: 600; font-size: 36px; line-height: 1.15; margin: 0 0 12px; }
@@ -155,6 +157,7 @@ function shell({ canonical, title, description, ogImage, jsonLd, bodyHtml }) {
   <nav class="ssr-nav">
     <a class="ssr-nav-logo" href="${FRONTEND}/"><img src="${FRONTEND}/icon-192.png" alt="EventStrand"><span>EventStrand</span></a>
     <div class="ssr-nav-links">
+      <a href="${FRONTEND}/">Home</a>
       <a href="${FRONTEND}/#concept">About</a>
       <a href="${FRONTEND}/#how">How It Works</a>
       <a href="${FRONTEND}/#builder">Builder</a>
@@ -162,6 +165,7 @@ function shell({ canonical, title, description, ogImage, jsonLd, bodyHtml }) {
       <a href="${FRONTEND}/#venue-guides">Venue Guides</a>
       <a href="${FRONTEND}/#directory">Directory</a>
       <a href="${FRONTEND}/#developer">Developers</a>
+      <a class="ssr-nav-btn" href="${FRONTEND}/spec">.rcal Spec</a>
       <a class="ssr-nav-cta" href="${FRONTEND}/#/dashboard">Open App</a>
     </div>
   </nav>
