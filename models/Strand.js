@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 const ruleSchema = new mongoose.Schema({
-  pattern:    { type: String, enum: ['daily','weekly','monthly_week','monthly_date','annual'], default: 'weekly' },
+  pattern:    { type: String, enum: ['daily','weekly','monthly_week','monthly_date','annual','weekdays'], default: 'weekly' },
   every:      { type: Number, default: 1 },
   days:       [String],
   time_start: String,
@@ -11,6 +11,13 @@ const ruleSchema = new mongoose.Schema({
   month_date: Number,
   season_start: String,
   season_end:   String,
+  // spec v0.2 additions
+  start_date:       String,
+  end_date:         String,
+  season_start_day: Number,
+  season_end_day:   Number,
+  fuzzy_start:      Boolean,
+  fuzzy_end:        Boolean,
 }, { _id: false });
 
 const exceptionSchema = new mongoose.Schema({
@@ -19,6 +26,8 @@ const exceptionSchema = new mongoose.Schema({
   date_end:   String,
   note:       String,
   time_start: String,
+  time_end:   String,
+  location:   String,
 }, { _id: false });
 
 const dateEntrySchema = new mongoose.Schema({
@@ -27,10 +36,16 @@ const dateEntrySchema = new mongoose.Schema({
   time_end:   String,
   all_day:    { type: Boolean, default: false },
   note:       String,
+  location:   String,
 }, { _id: false });
 
 const eventSchema = new mongoose.Schema({
+  // stable .rcal event id (spec v0.2). Never changes on rename.
+  spec_id:      String,
   title:        String,
+  description:  String,
+  location:     String,
+  timezone:     String,
   category:     String,
   vibes:        [String],
   price:        { type: String, default: 'free' },

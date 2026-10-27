@@ -52,14 +52,14 @@ router.post('/', auth, validate(schemas.strandCreate), async (req, res, next) =>
       title:           meta.title,
       description:     meta.description,
       type:            meta.type,
-      venue:           meta.location,
-      address:         meta.location,
+      venue:           locStr(meta.location, 'venue'),
+      address:         locStr(meta.location, 'address'),
       timezone:        meta.timezone,
       color:           meta.color,
       website:         meta.website,
       visibility:      visibility || meta.visibility || 'public',
       accessCode:      accessCode || meta.access_code,
-      events:          (events || []).map(e => normaliseEvent(e, null)),
+      events:          assignSpecIds((events || []).map(e => normaliseEvent(e, null, null))),
       published:       false,
     });
     res.json({ strand });
@@ -78,8 +78,8 @@ router.put('/:id', auth, validate(schemas.strandUpdate), async (req, res, next) 
       if (meta.description) strand.description = meta.description;
       if (meta.type)        strand.type        = meta.type;
       if (meta.location) {
-        strand.venue   = meta.location;
-        strand.address = meta.location;   // keep both fields in sync
+        strand.venue   = locStr(meta.location, 'venue');
+        strand.address = locStr(meta.location, 'address');
       }
       if (meta.timezone)    strand.timezone    = meta.timezone;
       if (meta.color)       strand.color       = meta.color;
@@ -111,8 +111,9 @@ router.put('/:id', auth, validate(schemas.strandUpdate), async (req, res, next) 
       strand.events = events.map(e => {
         const prev = (e._id && existingById.get(e._id.toString()))
                   || existingByTitle.get(e.title?.toLowerCase());
-        return normaliseEvent(e, prev?.views ?? 0);
+        return normaliseEvent(e, prev?.views ?? 0, prev);
       });
+      strand.events = assignSpecIds(strand.events);
 
       // A new event is one that supplied no _id or supplied an _id we don't recognise
       const newCount = strand.events.length;
@@ -196,9 +197,43 @@ router.get('/:id/analytics', auth, async (req, res, next) => {
 });
 
 // Normalise incoming event data from .rcal format, preserving existing view count
-function normaliseEvent(e, existingViews) {
+function slugId(t) {
+  return String(t || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+}
+
+// Spec v0.2: every event has a unique, stable id. Keep any supplied/stored
+// spec_id; generate one only for events that have none; dedupe collisions.
+function assignSpecIds(events) {
+  const used = new Set();
+  events.forEach(ev => { if (ev.spec_id) used.add(ev.spec_id); });
+  const seen = new Set();
+  events.forEach((ev, i) => {
+    if (ev.spec_id && !seen.has(ev.spec_id)) { seen.add(ev.spec_id); return; }
+    const base = slugId(ev.title) || ('event-' + (i + 1));
+    let id = base, n = 2;
+    while (used.has(id) || seen.has(id)) id = base + '-' + (n++);
+    ev.spec_id = id; used.add(id); seen.add(id);
+  });
+  return events;
+}
+
+// meta.location may be a string or the spec object
+function locStr(loc, kind) {
+  if (!loc) return undefined;
+  if (typeof loc === 'string') return loc;
+  const o = loc;
+  if (kind === 'venue') return o.name || o.address || undefined;
+  return [o.address, o.city, o.state, o.country].filter(Boolean).join(', ') || o.name || undefined;
+}
+
+function normaliseEvent(e, existingViews, prev) {
   const dates = e.dates || [];
   return {
+    spec_id:        e.spec_id || prev?.spec_id,
+    description:    e.description,
+    location:       e.location,
+    timezone:       e.timezone,
     title:          e.title,
     category:       e.category,
     vibes:          e.vibes || [],
