@@ -3,6 +3,7 @@ const router    = express.Router();
 const auth      = require('../middleware/auth');
 const Workspace = require('../models/Workspace');
 const { DateTime } = require('luxon');
+const { hasNoTime } = require('../lib/schedule');
 
 // GET /api/dashboard/upcoming?workspaceId=xxx
 router.get('/upcoming', auth, async (req, res, next) => {
@@ -37,12 +38,12 @@ router.get('/upcoming', auth, async (req, res, next) => {
 
         for (const ev of strand.events || []) {
           const upcoming = getUpcomingDates(ev, from, to, tz);
-          for (const { date, timeStart, allDay } of upcoming) {
+          for (const { date, timeStart, noTime } of upcoming) {
             events.push({
               title:       ev.title || strand.title,
               date:        date,
               time:        timeStart || '',
-              allDay:      !!allDay,
+              noTime:      !!noTime,
               strandId:    strand._id,
               strandTitle: strand.title,
               venue:       strand.venue || '',
@@ -65,7 +66,7 @@ router.get('/upcoming', auth, async (req, res, next) => {
 // ── RECURRENCE ENGINE ─────────────────────────────────────────
 // All date math happens in the strand's timezone via Luxon DateTime.
 // `from` and `to` are DateTime objects already pinned to that zone.
-// One-off and date-list events use plain ISO date strings (YYYY-MM-DD)
+// A single `date` and curated `dates` entries use plain ISO date strings (YYYY-MM-DD)
 // which are timezone-agnostic — they refer to a calendar date in
 // whatever zone the publisher set.
 function getUpcomingDates(ev, from, to, tz) {
@@ -73,21 +74,24 @@ function getUpcomingDates(ev, from, to, tz) {
   const fromIso = from.toISODate();
   const toIso   = to.toISODate();
 
-  if (ev.event_type === 'oneoff' || ev.date) {
-    if (ev.date && ev.date >= fromIso && ev.date <= toIso) {
-      results.push({ date: ev.date, timeStart: ev.all_day ? '' : ev.time_start, allDay: !!ev.all_day });
-    }
-    return results;
+  // date, dates[] and recurrence[] may be combined freely — occurrences from
+  // all of them are merged, and a repeated calendar date is listed once.
+  const addOcc = (date, timeStart, noTime) => {
+    if (results.find(x => x.date === date)) return;
+    results.push({ date, timeStart: noTime ? '' : (timeStart || ''), noTime: !!noTime });
+  };
+
+  // A single date, on its own or alongside other schedule fields.
+  if (ev.date && ev.date >= fromIso && ev.date <= toIso) {
+    addOcc(ev.date, ev.time_start, hasNoTime(ev));
   }
 
   // Curated dates[] — the sole schedule for a "Date List" event, or extra
-  // dates coexisting with recurrence[] on a "Recurring" event (spec dates[]).
-  if (ev.dates?.length) {
-    for (const entry of ev.dates) {
-      if (!entry.date) continue;
-      if (entry.date >= fromIso && entry.date <= toIso) {
-        results.push({ date: entry.date, timeStart: entry.all_day ? '' : entry.time_start, allDay: !!entry.all_day });
-      }
+  // dates coexisting with a date or recurrence[] (spec dates[]).
+  for (const entry of ev.dates || []) {
+    if (!entry.date) continue;
+    if (entry.date >= fromIso && entry.date <= toIso) {
+      addOcc(entry.date, entry.time_start, hasNoTime(entry));
     }
   }
 
@@ -107,7 +111,7 @@ function getUpcomingDates(ev, from, to, tz) {
     const dateStr = d.toISODate();
     const dayAbbr = DOW_ABBR[d.weekday - 1];
     let dayMatch = false;
-    let matchedAllDay = false;
+    let matchedNoTime = false;
     let matchedTimeStart = '';
 
     for (const rule of rules) {
@@ -150,8 +154,8 @@ function getUpcomingDates(ev, from, to, tz) {
 
       if (match) {
         dayMatch = true;
-        matchedAllDay = !!rule.all_day;
-        matchedTimeStart = rule.all_day ? '' : (rule.time_start || '');
+        matchedNoTime = hasNoTime(rule);
+        matchedTimeStart = matchedNoTime ? '' : (rule.time_start || '');
         break; // first matching rule supplies the displayed time for this date
       }
     }
@@ -165,7 +169,7 @@ function getUpcomingDates(ev, from, to, tz) {
     }
 
     if (dayMatch && !results.find(x => x.date === dateStr)) {
-      results.push({ date: dateStr, timeStart: matchedTimeStart, allDay: matchedAllDay });
+      results.push({ date: dateStr, timeStart: matchedTimeStart, noTime: matchedNoTime });
     }
 
     d = d.plus({ days: 1 });

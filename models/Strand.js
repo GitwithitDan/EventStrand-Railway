@@ -6,12 +6,13 @@ const ruleSchema = new mongoose.Schema({
   days:       [String],
   time_start: String,
   time_end:   String,
-  all_day:    { type: Boolean, default: false },
+  no_time:    { type: Boolean, default: false },
+  all_day:    Boolean, // legacy name for no_time; read, never written
   month_week: String,
   month_date: Number,
   season_start: String,
   season_end:   String,
-  // spec v0.2 additions
+  // seasonal windows and fuzzy edges
   start_date:       String,
   end_date:         String,
   season_start_day: Number,
@@ -34,13 +35,14 @@ const dateEntrySchema = new mongoose.Schema({
   date:       String,
   time_start: String,
   time_end:   String,
-  all_day:    { type: Boolean, default: false },
+  no_time:    { type: Boolean, default: false },
+  all_day:    Boolean, // legacy name for no_time; read, never written
   note:       String,
   location:   String,
 }, { _id: false });
 
 const eventSchema = new mongoose.Schema({
-  // stable .rcal event id (spec v0.2). Never changes on rename.
+  // stable .rcal event id. Never changes on rename.
   spec_id:      String,
   title:        String,
   description:  String,
@@ -59,7 +61,8 @@ const eventSchema = new mongoose.Schema({
   date:         String,
   time_start:   String,
   time_end:     String,
-  all_day:      { type: Boolean, default: false },
+  no_time:      { type: Boolean, default: false },
+  all_day:      Boolean, // legacy name for no_time; read, never written
   // curated dates — sole schedule for Date List events, or extra dates
   // coexisting with recurrence[] on Recurring events (spec dates[])
   dates:        [dateEntrySchema],

@@ -68,17 +68,17 @@ function describeRule(rule) {
 }
 function nth(n) { return ['th','st','nd','rd'][n%100>10 && n%100<14 ? 0 : Math.min(n%10, 4) === 4 ? 0 : n%10]; }
 
-// Full schedule description for an event: one-off date, all recurrence
+// Full schedule description for an event: a single date, all recurrence
 // rules joined (rules are additive), plus curated dates[] if present.
 function describeSchedule(ev) {
-  if (ev.date) return esc(ev.date);
   const parts = [];
+  if (ev.date) parts.push(esc(ev.date));
   if (ev.recurrence?.length) {
     const ruleDescs = ev.recurrence.map(describeRule).filter(Boolean);
     if (ruleDescs.length) parts.push(esc(ruleDescs.join(' + ')));
   }
   if (ev.dates?.length) {
-    if (ev.recurrence?.length) {
+    if (ev.recurrence?.length || ev.date) {
       parts.push(`+${ev.dates.length} extra date${ev.dates.length !== 1 ? 's' : ''}`);
     } else {
       const sorted = ev.dates.filter(d => d.date).map(d => d.date).sort();

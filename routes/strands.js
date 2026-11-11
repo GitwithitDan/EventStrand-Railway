@@ -5,6 +5,7 @@ const Strand     = require('../models/Strand');
 const Workspace  = require('../models/Workspace');
 const Notification = require('../models/Notification');
 const { validate, schemas } = require('../lib/validators');
+const { normaliseSchedule } = require('../lib/schedule');
 
 // Notify all subscribers of a strand update
 async function notifySubscribers(strandId, strandTitle, message) {
@@ -202,7 +203,7 @@ function slugId(t) {
     .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
 }
 
-// Spec v0.2: every event has a unique, stable id. Keep any supplied/stored
+// Every event has a unique, stable id. Keep any supplied/stored
 // spec_id; generate one only for events that have none; dedupe collisions.
 function assignSpecIds(events) {
   const used = new Set();
@@ -228,7 +229,8 @@ function locStr(loc, kind) {
 }
 
 function normaliseEvent(e, existingViews, prev) {
-  const dates = e.dates || [];
+  // date / dates / recurrence may be combined freely; see lib/schedule.js
+  const s = normaliseSchedule(e);
   return {
     spec_id:        e.spec_id || prev?.spec_id,
     description:    e.description,
@@ -242,13 +244,13 @@ function normaliseEvent(e, existingViews, prev) {
     ticket_url:     e.ticket_url,
     lead_time_days: e.lead_time_days || 0,
     notes:          e.notes,
-    event_type:     e.date ? 'oneoff' : e.recurrence?.length ? 'recurring' : dates.length ? 'datelist' : 'recurring',
-    date:           e.date,
-    time_start:     e.time_start,
-    time_end:       e.time_end,
-    all_day:        e.all_day || false,
-    dates:          dates,
-    recurrence:     e.recurrence || [],
+    event_type:     s.date ? 'oneoff' : s.recurrence.length ? 'recurring' : s.dates.length ? 'datelist' : 'recurring',
+    date:           s.date,
+    time_start:     s.time_start,
+    time_end:       s.time_end,
+    no_time:        s.no_time,
+    dates:          s.dates,
+    recurrence:     s.recurrence,
     exceptions:     e.exceptions || [],
     views:          existingViews ?? e.views ?? 0,
   };
