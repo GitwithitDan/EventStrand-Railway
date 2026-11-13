@@ -55,6 +55,14 @@ function setAuthCookie(res, token) {
   });
 }
 
+// New accounts must confirm their email before they can sign in. This needs
+// working email delivery, so it applies only when RESEND_API_KEY is set;
+// without it, sign-up signs the user in directly as before.
+const verificationRequired = () => !!process.env.RESEND_API_KEY;
+// The one reply every sign-up gets, whether or not the address already has an
+// account, so the form never reveals who is registered.
+const SIGNUP_REPLY = { ok: true, verifyRequired: true };
+
 function newToken() {
   return crypto.randomBytes(32).toString('hex');
 }
@@ -105,9 +113,10 @@ router.post('/register', validate(schemas.register), async (req, res, next) => {
         <a href="https://eventstrand.com/#login">sign in</a> instead.</p>
         <p>If it wasn't you, no action is needed.</p>`;
       sendEmail({ to: existing.email, subject, html }).catch(() => {});
-      // Return a token for the NEW user attempt — but there's no new user.
-      // Simplest safe approach: return 201 with a generic message; no token, no user data.
-      return res.status(201).json({ ok: true });
+      // Spend the same time hashing as a real sign-up would, so response time
+      // does not give the answer away either.
+      await bcrypt.hash(password, 12);
+      return res.status(201).json(verificationRequired() ? SIGNUP_REPLY : { ok: true });
     }
 
     const passwordHash = await bcrypt.hash(password, 12);
@@ -126,6 +135,8 @@ router.post('/register', validate(schemas.register), async (req, res, next) => {
     // Fire-and-forget — don't block signup on email delivery
     const tpl = verifyEmailTemplate(user.displayName, rawVerifyToken);  // raw goes in email
     sendEmail({ to: user.email, ...tpl }).catch(e => console.error('verify email send failed:', e));
+
+    if (verificationRequired()) return res.status(201).json(SIGNUP_REPLY);
 
     const token = signToken(user);
     setAuthCookie(res, token);
@@ -164,6 +175,23 @@ router.post('/login', validate(schemas.login), async (req, res, next) => {
       await user.save();
       // Same message as an unknown email, so the reply never confirms an account exists.
       return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    // Right password, but the email was never confirmed: send a fresh link
+    // instead of a session.
+    if (!user.emailVerified && verificationRequired()) {
+      const rawVerifyToken = newToken();
+      user.verifyToken        = hashToken(rawVerifyToken);
+      user.verifyTokenExpires = new Date(Date.now() + VERIFY_TTL_MS);
+      user.failedLoginAttempts = 0;
+      user.lockUntil = null;
+      await user.save();
+      const tpl = verifyEmailTemplate(user.displayName, rawVerifyToken);
+      sendEmail({ to: user.email, ...tpl }).catch(e => console.error('verify email send failed:', e));
+      return res.status(403).json({
+        error: 'Confirm your email first — we just sent a new link to your inbox.',
+        needsVerification: true,
+      });
     }
 
     // Successful login — clear any accumulated failures.
