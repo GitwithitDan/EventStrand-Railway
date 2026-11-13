@@ -106,6 +106,7 @@ const strandSchema = new mongoose.Schema({
   scanCount:        { type: Number, default: 0 },
   subscriberCount:  { type: Number, default: 0 },
   viewsHistory:     { type: [Number], default: () => new Array(30).fill(0) }, // rolling 30-day
+  viewsHistoryDay:  Number, // day number of the last recorded view (see lib/views.js)
   scanOrigins:      [{ label: String, count: Number }],
   lastViewedAt:     Date,
 }, { timestamps: true });

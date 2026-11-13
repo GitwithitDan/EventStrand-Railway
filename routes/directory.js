@@ -20,10 +20,21 @@ const PRIVATE_RANGES = [
   /^fd[0-9a-f]{2}:/i,
   /^fe80:/i,
   /^0\./,
+  /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, // carrier-grade NAT 100.64.0.0/10
+  /^192\.0\.0\./,
+  /^198\.1[89]\./,
+  /^(22[4-9]|2[3-5]\d)\./,                     // multicast and reserved
+  /^::$/,
+  /^ff[0-9a-f]{2}:/i,
 ];
 
 function isPrivateIp(ip) {
-  return PRIVATE_RANGES.some(r => r.test(ip));
+  let addr = String(ip).replace(/^\[|\]$/g, '');
+  // IPv4-mapped IPv6 (::ffff:10.0.0.1) is judged by the IPv4 address inside it.
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(addr);
+  if (mapped) addr = mapped[1];
+  else if (/^::ffff:/i.test(addr)) return true;
+  return PRIVATE_RANGES.some(r => r.test(addr));
 }
 
 async function assertPublicHostname(hostname) {
@@ -31,6 +42,7 @@ async function assertPublicHostname(hostname) {
   if (hostname === 'localhost' || hostname.endsWith('.local') || hostname.endsWith('.internal')) {
     throw new Error(`Hostname "${hostname}" is not allowed`);
   }
+  hostname = String(hostname).replace(/^\[|\]$/g, '');
   // For numeric IPs validate directly
   if (net.isIP(hostname)) {
     if (isPrivateIp(hostname)) throw new Error(`IP address "${hostname}" is not allowed`);
@@ -48,10 +60,37 @@ async function assertPublicHostname(hostname) {
   }
 }
 
+// Fetches a public http(s) URL. Redirects are followed by hand, at most five,
+// and every hop is checked again, so a public address cannot bounce the
+// request to a private one.
 async function safeFetch(url, options = {}) {
-  const parsed = new URL(url);
-  await assertPublicHostname(parsed.hostname);
-  return fetch(url, options);
+  let current = url;
+  for (let hop = 0; hop <= 5; hop++) {
+    const parsed = new URL(current);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('Only http and https URLs are allowed');
+    await assertPublicHostname(parsed.hostname);
+    const res = await fetch(current, { ...options, redirect: 'manual' });
+    if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+      current = new URL(res.headers.get('location'), current).toString();
+      continue;
+    }
+    return res;
+  }
+  throw new Error('Too many redirects');
+}
+
+// Reads at most `limit` bytes of a response body as text.
+async function readCapped(res, limit = 2 * 1024 * 1024) {
+  if (!res.body || !res.body.getReader) return (await res.text()).slice(0, limit);
+  const reader = res.body.getReader();
+  const chunks = []; let size = 0;
+  while (size < limit) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(Buffer.from(value)); size += value.length;
+  }
+  reader.cancel().catch(() => {});
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 async function safePuppeteerGoto(page, url, options = {}) {
@@ -84,10 +123,9 @@ async function layer1StaticFetch(verificationUrl, strandUrl) {
     const res = await safeFetch(verificationUrl, {
       headers: { 'User-Agent': 'EventStrand-Verifier/1.0 (+https://eventstrand.com)' },
       signal:  AbortSignal.timeout(10000),
-      redirect: 'follow',
     });
     if (!res.ok) return false;
-    const html = await res.text();
+    const html = await readCapped(res);
     return html.includes(strandUrl);
   } catch (e) {
     console.warn('[verify L1] static fetch failed:', e.message);
@@ -355,9 +393,11 @@ router.delete('/:id/withdraw', auth, async (req, res, next) => {
 // GET /api/directory/public/directory — public listing of verified strands
 router.get('/public/directory', async (req, res, next) => {
   try {
-    const { type, city, page = 1 } = req.query;
+    const type = typeof req.query.type === 'string' ? req.query.type.slice(0, 60) : '';
+    const city = typeof req.query.city === 'string' ? req.query.city.trim().slice(0, 80) : '';
+    const page = Math.min(Math.max(parseInt(req.query.page, 10) || 1, 1), 1000);
     const limit = 24;
-    const skip  = (parseInt(page) - 1) * limit;
+    const skip  = (page - 1) * limit;
 
     const filter = {
       directoryStatus: 'verified',
@@ -365,11 +405,15 @@ router.get('/public/directory', async (req, res, next) => {
       visibility:      'public',
     };
     if (type) filter.type = type;
-    if (city) filter.city = new RegExp(city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    if (city) {
+      // Strands saved before the city was stored separately still match on their address.
+      const re = new RegExp(city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [{ city: re }, { address: re }];
+    }
 
     const [strands, total] = await Promise.all([
       Strand.find(filter)
-        .select('title type venue city description color publisherHandle')
+        .select('title type venue city address description color publisherHandle')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -382,7 +426,7 @@ router.get('/public/directory', async (req, res, next) => {
     res.json({
       strands,
       total,
-      page:  parseInt(page),
+      page,
       pages: Math.ceil(total / limit),
     });
   } catch (e) { next(e); }

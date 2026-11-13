@@ -5,6 +5,10 @@ const Workspace    = require('../models/Workspace');
 const Strand       = require('../models/Strand');
 const Braid        = require('../models/Braid');
 const Notification = require('../models/Notification');
+const mongoose     = require('mongoose');
+const { checkPasscode } = require('../lib/access');
+
+const isId = v => typeof v === 'string' && mongoose.isValidObjectId(v);
 
 // ─────────────────────────────────────────────────────────────
 // WORKSPACES
@@ -77,8 +81,15 @@ router.patch('/workspaces/:id', auth, async (req, res, next) => {
     if (!workspace) return res.status(404).json({ error: 'Workspace not found' });
 
     const { name, icon } = req.body;
-    if (name !== undefined) workspace.name = name.trim().slice(0, 50);
-    if (icon !== undefined) workspace.icon = icon;
+    if (name !== undefined) {
+      const clean = typeof name === 'string' ? name.trim().slice(0, 50) : '';
+      if (!clean) return res.status(400).json({ error: 'Workspace name cannot be empty' });
+      workspace.name = clean;
+    }
+    if (icon !== undefined) {
+      if (typeof icon !== 'string' || icon.length > 32) return res.status(400).json({ error: 'Invalid icon' });
+      workspace.icon = icon;
+    }
     await workspace.save();
 
     res.json({
@@ -172,10 +183,15 @@ router.get('/subscriptions', auth, async (req, res, next) => {
 router.post('/strands', auth, async (req, res, next) => {
   try {
     const { strandId, workspaceId } = req.body;
-    if (!strandId) return res.status(400).json({ error: 'strandId required' });
+    if (!isId(strandId)) return res.status(400).json({ error: 'strandId required' });
 
-    const strand = await Strand.findOne({ _id: strandId, published: true });
+    const strand = await Strand.findOne({ _id: strandId, published: true })
+      .select('publisher visibility accessCode');
     if (!strand) return res.status(404).json({ error: 'Strand not found' });
+
+    // A protected strand needs its passcode to subscribe, exactly as it does to view.
+    const denied = checkPasscode(req, strand);
+    if (denied) return res.status(denied.status).json({ error: denied.error, passcodeHeader: true });
 
     // Resolve target workspace
     let workspace;
@@ -217,18 +233,16 @@ router.post('/strands', auth, async (req, res, next) => {
 router.delete('/strands/:strandId', auth, async (req, res, next) => {
   try {
     const { strandId } = req.params;
+    if (!isId(strandId)) return res.status(404).json({ error: 'Strand not found' });
 
-    await Workspace.updateMany(
+    const removed = await Workspace.updateMany(
       { user: req.user._id, strands: strandId },
       { $pull: { strands: strandId } },
     );
 
-    const stillSubscribed = await Workspace.exists({
-      user:    req.user._id,
-      strands: strandId,
-    });
-    if (!stillSubscribed) {
-      await Strand.findByIdAndUpdate(strandId, { $inc: { subscriberCount: -1 } });
+    // Only a caller who really was subscribed lowers the count, and never below zero.
+    if (removed.modifiedCount > 0) {
+      await Strand.updateOne({ _id: strandId, subscriberCount: { $gt: 0 } }, { $inc: { subscriberCount: -1 } });
     }
 
     res.json({ ok: true });
@@ -239,10 +253,19 @@ router.delete('/strands/:strandId', auth, async (req, res, next) => {
 router.post('/braids', auth, async (req, res, next) => {
   try {
     const { braidId, workspaceId } = req.body;
-    if (!braidId) return res.status(400).json({ error: 'braidId required' });
+    if (!isId(braidId)) return res.status(400).json({ error: 'braidId required' });
 
     const braid = await Braid.findOne({ _id: braidId, published: true });
     if (!braid) return res.status(404).json({ error: 'Braid not found' });
+
+    const denied = checkPasscode(req, braid);
+    if (denied) return res.status(denied.status).json({ error: denied.error, passcodeHeader: true });
+
+    // Only strands that are open to read come along with a braid: published and
+    // not behind their own passcode.
+    const openStrands = await Strand.find({
+      _id: { $in: braid.strands }, published: true, visibility: { $ne: 'protected' },
+    }).select('_id').lean();
 
     let workspace;
     if (workspaceId) {
@@ -271,7 +294,7 @@ router.post('/braids', auth, async (req, res, next) => {
     }
 
     // Fan out strand subscriptions atomically
-    for (const sid of braid.strands.map(id => id.toString())) {
+    for (const sid of openStrands.map(s => s._id.toString())) {
       const sResult = await Workspace.updateOne(
         { _id: workspace._id, user: req.user._id, strands: { $ne: sid } },
         { $addToSet: { strands: sid } },
@@ -296,18 +319,15 @@ router.post('/braids', auth, async (req, res, next) => {
 router.delete('/braids/:braidId', auth, async (req, res, next) => {
   try {
     const { braidId } = req.params;
+    if (!isId(braidId)) return res.status(404).json({ error: 'Braid not found' });
 
-    await Workspace.updateMany(
+    const removed = await Workspace.updateMany(
       { user: req.user._id, braids: braidId },
       { $pull: { braids: braidId } },
     );
 
-    const stillSubscribed = await Workspace.exists({
-      user:   req.user._id,
-      braids: braidId,
-    });
-    if (!stillSubscribed) {
-      await Braid.findByIdAndUpdate(braidId, { $inc: { subscriberCount: -1 } });
+    if (removed.modifiedCount > 0) {
+      await Braid.updateOne({ _id: braidId, subscriberCount: { $gt: 0 } }, { $inc: { subscriberCount: -1 } });
     }
 
     res.json({ ok: true });

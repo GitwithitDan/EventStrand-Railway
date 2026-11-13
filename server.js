@@ -29,9 +29,12 @@ const app = express();
 const allowedOrigins = [
   process.env.FRONTEND_URL || 'https://eventstrand.com',
   'https://www.eventstrand.com',
-  'http://localhost:3000',
-  'http://localhost:8080',
 ];
+// Local development origins are trusted only outside production, so a page
+// running on a visitor's own machine can never make signed-in requests.
+if (process.env.NODE_ENV !== 'production') {
+  allowedOrigins.push('http://localhost:3000', 'http://localhost:8080');
+}
 const corsOptions = {
   origin: (origin, cb) => {
     // B-4: Return cb(null, false) for disallowed origins instead of throwing.
@@ -215,9 +218,14 @@ app.get('/health', async (req, res) => {
 // Never send raw internal error text (database errors, stack details) to
 // the browser. 4xx errors we raised on purpose keep their message; everything
 // else gets a generic message and the real error goes to the logs.
+// "The database is unreachable" (503 + ops alert) is kept apart from "this
+// query was malformed" (a Mongo error with a server error code), so a bad
+// request can never raise a false outage alert.
 function isDbError(err) {
   const n = String(err?.name || '');
-  return n.startsWith('Mongo') || n === 'MongooseServerSelectionError' || n === 'MongooseError';
+  if (!(n.startsWith('Mongo') || n === 'MongooseServerSelectionError' || n === 'MongooseError')) return false;
+  if (n === 'MongoServerError') return [13, 18, 8000].includes(err.code); // auth / Atlas access failures only
+  return true;
 }
 app.use((err, req, res, next) => {
   console.error(err.stack || err);

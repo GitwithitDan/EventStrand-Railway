@@ -39,6 +39,9 @@ const userSchema = new mongoose.Schema({
   // limiter in server.js. Reset to 0 on any successful login.
   failedLoginAttempts:  { type: Number, default: 0, select: false },
   lockUntil:            { type: Date,   default: null, select: false },
+
+  // Bumped to invalidate every session token issued before the change.
+  tokenVersion:         { type: Number, default: 0 },
 }, { timestamps: true });
 
 userSchema.index({ previousHandles: 1 });

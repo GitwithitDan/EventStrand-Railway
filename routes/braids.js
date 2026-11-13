@@ -6,6 +6,21 @@ const Strand     = require('../models/Strand');
 const Workspace  = require('../models/Workspace');
 const Notification = require('../models/Notification');
 const { validate, schemas } = require('../lib/validators');
+const mongoose = require('mongoose');
+
+// A braid may hold the publisher's own strands and anyone's public, published
+// strands. Anything else — another publisher's unlisted, protected or draft
+// strand, or an id that does not exist — is dropped.
+async function allowedStrandIds(userId, ids) {
+  const clean = [...new Set((ids || []).filter(id => typeof id === 'string' && mongoose.isValidObjectId(id)))];
+  if (!clean.length) return [];
+  const found = await Strand.find({
+    _id: { $in: clean },
+    $or: [{ publisher: userId }, { published: true, visibility: 'public' }],
+  }).select('_id').lean();
+  const ok = new Set(found.map(s => s._id.toString()));
+  return clean.filter(id => ok.has(id));
+}
 
 // GET /api/braids/mine
 router.get('/mine', auth, async (req, res, next) => {
@@ -30,7 +45,7 @@ router.post('/', auth, validate(schemas.braidCreate), async (req, res, next) => 
       publisher:       req.user._id,
       publisherHandle: req.user.handle,
       title, description,
-      strands:    strandIds || [],
+      strands:    await allowedStrandIds(req.user._id, strandIds),
       visibility: visibility || 'public',
       accessCode: visibility === 'protected' ? accessCode : undefined,
       published:  true,
@@ -48,13 +63,21 @@ router.put('/:id', auth, validate(schemas.braidUpdate), async (req, res, next) =
 
     const { title, description, strandIds, visibility, accessCode } = req.body;
     const prevStrandIds = braid.strands.map(s => s.toString());
-    const newStrandIds  = strandIds || prevStrandIds;
-    const added = newStrandIds.filter(id => !prevStrandIds.includes(id));
+    const newStrandIds  = strandIds ? await allowedStrandIds(req.user._id, strandIds) : prevStrandIds;
+    const addedIds = newStrandIds.filter(id => !prevStrandIds.includes(id));
+    // Only strands open to read are pushed into subscribers' portals.
+    const added = addedIds.length
+      ? (await Strand.find({ _id: { $in: addedIds }, published: true, visibility: { $ne: 'protected' } })
+          .select('_id').lean()).map(s => s._id.toString())
+      : [];
 
     if (title)       braid.title       = title;
-    if (description) braid.description = description;
+    if (description !== undefined) braid.description = description;
     if (visibility)  braid.visibility  = visibility;
     if (accessCode !== undefined) braid.accessCode = accessCode;
+    if (braid.visibility === 'protected' && (!braid.accessCode || !braid.accessCode.trim())) {
+      return res.status(400).json({ error: 'Set a passcode for a protected braid' });
+    }
     braid.strands = newStrandIds;
     await braid.save();
 

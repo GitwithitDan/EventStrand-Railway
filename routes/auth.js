@@ -25,8 +25,20 @@ const RESET_TTL_MS  = 60 * 60 * 1000;             // 1 hour
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_LOCK_MS      = 15 * 60 * 1000;         // 15 minutes
 
-function signToken(userId) {
-  return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: '90d' });
+// `tv` is the user's tokenVersion at signing time. Bumping tokenVersion (password
+// reset, sign out everywhere, account linking) invalidates every earlier token.
+function signToken(user) {
+  return jwt.sign({ userId: user._id, tv: user.tokenVersion || 0 }, process.env.JWT_SECRET, { expiresIn: '90d' });
+}
+
+const escHtml = s => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+// Every sign-in response carries cookieSession:true. The web app then relies on
+// the httpOnly cookie alone and never keeps the token where page scripts can
+// read it. `token` stays in the body for non-browser clients.
+function sessionJson(token, user, extras = {}) {
+  return { ...extras, token, cookieSession: true, user: userJson(user) };
 }
 
 // Set the JWT as an httpOnly cookie so JS cannot read it (XSS protection).
@@ -87,7 +99,7 @@ router.post('/register', validate(schemas.register), async (req, res, next) => {
     if (existing) {
       // Fire-and-forget — tell the real owner someone tried to register with their email
       const subject = 'Someone tried to register with your EventStrand email';
-      const html    = `<p>Hi ${existing.displayName},</p>
+      const html    = `<p>Hi ${escHtml(existing.displayName)},</p>
         <p>Someone just tried to register an EventStrand account using your email address.
         If that was you, you already have an account — just
         <a href="https://eventstrand.com/#login">sign in</a> instead.</p>
@@ -115,9 +127,9 @@ router.post('/register', validate(schemas.register), async (req, res, next) => {
     const tpl = verifyEmailTemplate(user.displayName, rawVerifyToken);  // raw goes in email
     sendEmail({ to: user.email, ...tpl }).catch(e => console.error('verify email send failed:', e));
 
-    const token = signToken(user._id);
+    const token = signToken(user);
     setAuthCookie(res, token);
-    res.status(201).json({ token, user: userJson(user) });
+    res.status(201).json(sessionJson(token, user));
   } catch (e) {
     next(e);
   }
@@ -150,10 +162,8 @@ router.post('/login', validate(schemas.login), async (req, res, next) => {
         return res.status(423).json({ error: 'Too many failed attempts. Try again in 15 minutes.' });
       }
       await user.save();
-      const remaining = MAX_LOGIN_ATTEMPTS - user.failedLoginAttempts;
-      return res.status(401).json({
-        error: `Invalid email or password. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`,
-      });
+      // Same message as an unknown email, so the reply never confirms an account exists.
+      return res.status(401).json({ error: 'Invalid email or password' });
     }
 
     // Successful login — clear any accumulated failures.
@@ -163,9 +173,9 @@ router.post('/login', validate(schemas.login), async (req, res, next) => {
       await user.save();
     }
 
-    const token = signToken(user._id);
+    const token = signToken(user);
     setAuthCookie(res, token);
-    res.json({ token, user: userJson(user) });
+    res.json(sessionJson(token, user));
   } catch (e) {
     next(e);
   }
@@ -178,17 +188,33 @@ router.post('/google', async (req, res, next) => {
     const { credential } = req.body;
     if (!credential) return res.status(400).json({ error: 'Missing credential' });
 
-    const ticket = await client.verifyIdToken({
-      idToken: credential,
-      audience: process.env.GOOGLE_CLIENT_ID,
-    });
+    let ticket;
+    try {
+      ticket = await client.verifyIdToken({
+        idToken: credential,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+    } catch (verifyErr) {
+      return res.status(401).json({ error: 'Google sign-in could not be verified' });
+    }
     const payload = ticket.getPayload();
+    if (!payload || !payload.sub || !payload.email) {
+      return res.status(401).json({ error: 'Google sign-in could not be verified' });
+    }
     const { sub: googleId, email, name, picture, email_verified } = payload;
 
     const normEmail = email.toLowerCase();
 
     let user = await User.findOne({ googleId });
-    if (!user) user = await User.findOne({ email: normEmail });
+    let linkingByEmail = false;
+    if (!user) {
+      user = await User.findOne({ email: normEmail }).select('+passwordHash');
+      linkingByEmail = !!user;
+    }
+    // Linking to an existing account by email needs Google's proof of ownership.
+    if (linkingByEmail && !email_verified) {
+      return res.status(401).json({ error: 'Verify this email with Google before signing in' });
+    }
 
     if (!user) {
       try {
@@ -213,6 +239,13 @@ router.post('/google', async (req, res, next) => {
         }
       }
     } else {
+      // An account whose email was never verified may have been created by
+      // someone else using this address. The Google owner takes it over: the
+      // old password stops working and every earlier session is signed out.
+      if (linkingByEmail && !user.emailVerified) {
+        user.passwordHash = null;
+        user.tokenVersion = (user.tokenVersion || 0) + 1;
+      }
       user.googleId    = googleId;
       // Never overwrite a photo the user uploaded themselves.
       if (user.pictureSource !== 'upload' && picture) {
@@ -225,9 +258,9 @@ router.post('/google', async (req, res, next) => {
       await user.save();
     }
 
-    const token = signToken(user._id);
+    const token = signToken(user);
     setAuthCookie(res, token);
-    res.json({ token, user: userJson(user) });
+    res.json(sessionJson(token, user));
   } catch (e) {
     next(e);
   }
@@ -310,11 +343,13 @@ router.post('/reset-password', validate(schemas.resetPassword), async (req, res,
     user.resetTokenExpires = null;
     // Resetting via email proof also verifies the email
     user.emailVerified     = true;
+    // A new password signs out every session that existed before it.
+    user.tokenVersion      = (user.tokenVersion || 0) + 1;
     await user.save();
 
-    const newJwt = signToken(user._id);
+    const newJwt = signToken(user);
     setAuthCookie(res, newJwt);
-    res.json({ ok: true, token: newJwt, user: userJson(user) });
+    res.json(sessionJson(newJwt, user, { ok: true }));
   } catch (e) {
     next(e);
   }
@@ -423,9 +458,78 @@ router.post('/logout', (req, res) => {
   res.json({ ok: true });
 });
 
+// POST /api/auth/logout-all — sign out every device, including this one
+router.post('/logout-all', auth, async (req, res, next) => {
+  try {
+    req.user.tokenVersion = (req.user.tokenVersion || 0) + 1;
+    await req.user.save();
+    res.clearCookie('es_jwt', { httpOnly: true, secure: true, sameSite: 'strict', path: '/' });
+    res.json({ ok: true });
+  } catch (e) {
+    next(e);
+  }
+});
+
 // GET /api/auth/me — verify session and return current user (used on page load to restore session)
+// A browser that still holds an older header token is moved onto the httpOnly
+// cookie here, after which the web app discards its copy of the token.
 router.get('/me', auth, (req, res) => {
-  res.json({ user: userJson(req.user) });
+  if (!req.authViaCookie && !req.apiKey) setAuthCookie(res, signToken(req.user));
+  res.json({ user: userJson(req.user), cookieSession: true });
+});
+
+// DELETE /api/auth/account — permanently delete the account and everything it owns.
+// Body: { confirm: "DELETE" }. Accounts with a password must also send it.
+router.delete('/account', auth, async (req, res, next) => {
+  try {
+    if (req.apiKey) return res.status(403).json({ error: 'API keys cannot delete an account' });
+    if (req.body?.confirm !== 'DELETE') return res.status(400).json({ error: 'Type DELETE to confirm' });
+
+    const full = await User.findById(req.user._id).select('+passwordHash');
+    if (full.passwordHash) {
+      const ok = typeof req.body.password === 'string' && await bcrypt.compare(req.body.password, full.passwordHash);
+      if (!ok) return res.status(401).json({ error: 'Password is incorrect' });
+    }
+
+    const Strand       = require('../models/Strand');
+    const Braid        = require('../models/Braid');
+    const Workspace    = require('../models/Workspace');
+    const ApiKey       = require('../models/ApiKey');
+    const Interested   = require('../models/Interested');
+    const Notification = require('../models/Notification');
+    const userId = req.user._id;
+
+    // Give back the subscriber counts this account contributed.
+    const myWorkspaces = await Workspace.find({ user: userId }).select('strands braids').lean();
+    const subStrands = [...new Set(myWorkspaces.flatMap(w => (w.strands || []).map(String)))];
+    const subBraids  = [...new Set(myWorkspaces.flatMap(w => (w.braids  || []).map(String)))];
+    if (subStrands.length) await Strand.updateMany({ _id: { $in: subStrands }, subscriberCount: { $gt: 0 } }, { $inc: { subscriberCount: -1 } });
+    if (subBraids.length)  await Braid.updateMany({ _id: { $in: subBraids },  subscriberCount: { $gt: 0 } }, { $inc: { subscriberCount: -1 } });
+
+    // Remove what the account published from everyone else's portals and braids.
+    const ownStrands = (await Strand.find({ publisher: userId }).select('_id').lean()).map(s => s._id);
+    const ownBraids  = (await Braid.find({ publisher: userId }).select('_id').lean()).map(b => b._id);
+    if (ownStrands.length) {
+      await Workspace.updateMany({ strands: { $in: ownStrands } }, { $pull: { strands: { $in: ownStrands } } });
+      await Braid.updateMany({ strands: { $in: ownStrands } }, { $pull: { strands: { $in: ownStrands } } });
+    }
+    if (ownBraids.length) await Workspace.updateMany({ braids: { $in: ownBraids } }, { $pull: { braids: { $in: ownBraids } } });
+
+    await Promise.all([
+      Strand.deleteMany({ publisher: userId }),
+      Braid.deleteMany({ publisher: userId }),
+      Workspace.deleteMany({ user: userId }),
+      ApiKey.deleteMany({ user: userId }),
+      Interested.deleteMany({ user: userId }),
+      Notification.deleteMany({ user: userId }),
+    ]);
+    await User.deleteOne({ _id: userId });
+
+    res.clearCookie('es_jwt', { httpOnly: true, secure: true, sameSite: 'strict', path: '/' });
+    res.json({ ok: true });
+  } catch (e) {
+    next(e);
+  }
 });
 
 module.exports = router;

@@ -1,8 +1,8 @@
 // ── SERVER-SIDE RENDERED PUBLIC PAGES ─────────────────────────
 // Renders /s/:handle/:strandId, /b/:handle/:braidId, /p/:handle as
 // fully indexable HTML. Crawlers see prerendered content with rich
-// meta tags + JSON-LD; real users get the same HTML, then app.js
-// loads and the SPA's hash router hydrates the same view on top.
+// meta tags + JSON-LD; real users get the same HTML, with a link into the
+// app to subscribe.
 //
 // Wired up via Cloudflare Page Rule that proxies eventstrand.com/s/*
 // (and /b/*, /p/*) to api.eventstrand.com/ssr/* under the hood,
@@ -13,6 +13,19 @@ const router  = express.Router();
 const Strand  = require('../models/Strand');
 const Braid   = require('../models/Braid');
 const User    = require('../models/User');
+const mongoose = require('mongoose');
+const { DateTime } = require('luxon');
+const { getOccurrences, describeSchedule } = require('../lib/occurrences');
+
+const isId = v => mongoose.isValidObjectId(v);
+const WEEKDAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+const MONTHS   = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+// "2026-11-20" -> "Fri, Nov 20"
+function prettyDate(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return `${WEEKDAYS[dt.getUTCDay()]}, ${MONTHS[m - 1]} ${d}`;
+}
 
 const FRONTEND = process.env.FRONTEND_URL || 'https://eventstrand.com';
 
@@ -55,41 +68,8 @@ function metaDescription(text, max = 160) {
   return stripped.slice(0, max - 1).replace(/[,;:.\s]+\S*$/, '') + '…';
 }
 
-// Format a recurrence rule into human-readable text
-function describeRule(rule) {
-  if (!rule || !rule.pattern) return '';
-  const days = (rule.days || []).map(d => d.charAt(0).toUpperCase() + d.slice(1)).join(', ');
-  if (rule.pattern === 'daily')         return 'Daily';
-  if (rule.pattern === 'weekly')        return days ? `Weekly on ${days}` : 'Weekly';
-  if (rule.pattern === 'monthly_week')  return `${(rule.month_week||'first').replace(/^./, c => c.toUpperCase())} ${days || 'day'} of the month`;
-  if (rule.pattern === 'monthly_date')  return `Monthly on the ${rule.month_date || 1}${nth(rule.month_date || 1)}`;
-  if (rule.pattern === 'annual')        return rule.month_date ? `Annually on the ${rule.month_date}${nth(rule.month_date)}` : 'Annually';
-  return '';
-}
-function nth(n) { return ['th','st','nd','rd'][n%100>10 && n%100<14 ? 0 : Math.min(n%10, 4) === 4 ? 0 : n%10]; }
-
-// Full schedule description for an event: a single date, all recurrence
-// rules joined (rules are additive), plus curated dates[] if present.
-function describeSchedule(ev) {
-  const parts = [];
-  if (ev.date) parts.push(esc(ev.date));
-  if (ev.recurrence?.length) {
-    const ruleDescs = ev.recurrence.map(describeRule).filter(Boolean);
-    if (ruleDescs.length) parts.push(esc(ruleDescs.join(' + ')));
-  }
-  if (ev.dates?.length) {
-    if (ev.recurrence?.length || ev.date) {
-      parts.push(`+${ev.dates.length} extra date${ev.dates.length !== 1 ? 's' : ''}`);
-    } else {
-      const sorted = ev.dates.filter(d => d.date).map(d => d.date).sort();
-      if (sorted.length) parts.push(`Next: ${esc(sorted[0])}${sorted.length > 1 ? ` (+${sorted.length - 1} more)` : ''}`);
-    }
-  }
-  return parts.join(' · ');
-}
-
 // Page shell — used by every SSR response
-function shell({ canonical, title, description, ogImage, jsonLd, bodyHtml }) {
+function shell({ canonical, title, description, ogImage, jsonLd, bodyHtml, noindex }) {
   const safeTitle = esc(title);
   const safeDesc  = esc(description);
   const safeUrl   = esc(canonical);
@@ -102,6 +82,7 @@ function shell({ canonical, title, description, ogImage, jsonLd, bodyHtml }) {
   <title>${safeTitle}</title>
   <meta name="description" content="${safeDesc}">
   <link rel="canonical" href="${safeUrl}">
+  ${noindex ? '<meta name="robots" content="noindex, nofollow">' : ''}
   <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
   <link rel="apple-touch-icon" sizes="180x180" href="/icon-180.png">
   <link rel="manifest" href="/manifest.json">
@@ -194,7 +175,9 @@ function shell({ canonical, title, description, ogImage, jsonLd, bodyHtml }) {
 // ── /ssr/strand/:handle/:strandId ─────────────────────────────
 router.get('/strand/:handle/:strandId', async (req, res, next) => {
   try {
-    const { handle, strandId } = req.params;
+    const handle = String(req.params.handle || '').toLowerCase();
+    const { strandId } = req.params;
+    if (!isId(strandId)) return res.status(404).send(notFoundPage('Strand not found'));
     const user = await User.findOne({
       $or: [{ handle }, { previousHandles: handle }]
     });
@@ -211,28 +194,45 @@ router.get('/strand/:handle/:strandId', async (req, res, next) => {
     if (!strand) return res.status(404).send(notFoundPage('Strand not found'));
 
     // Protected strands shouldn't reveal content server-side without the passcode
+    // Nothing about it — not even its name — is shown or indexed.
     if (strand.visibility === 'protected') {
+      res.set('Cache-Control', 'no-store');
       return res.send(passcodeGatePage({
         canonical: `${FRONTEND}/s/${handle}/${strandId}`,
-        title: `${strand.title} — passcode required`,
+        openUrl:   `${FRONTEND}/#/s/${handle}/${strandId}`,
+        what:      'strand',
       }));
     }
+    // Unlisted strands open for anyone with the link but stay out of search engines.
+    const noindex = strand.visibility !== 'public';
 
     const canonical = `${FRONTEND}/s/${handle}/${strandId}`;
     const title     = `${strand.title} · @${handle} · EventStrand`;
     const desc      = metaDescription(strand.description || `${strand.title} — a living event schedule${strand.venue ? ' at ' + strand.venue : ''}.`);
     const ogImage   = `${FRONTEND}/icon-512.png`;
 
-    const events = (strand.events || []).slice(0, 30);
-    const eventsHtml = events.length ? events.map(ev => {
-      const when = describeSchedule(ev);
-      return `
+    // Real upcoming dates for the next 90 days, in the strand's own time zone.
+    let now = DateTime.now().setZone(strand.timezone || 'UTC');
+    if (!now.isValid) now = DateTime.now().setZone('UTC');
+    const from = now.toISODate(), to = now.plus({ days: 90 }).toISODate();
+    const occurrences = [];
+    for (const ev of strand.events || []) {
+      for (const o of getOccurrences(ev, from, to)) occurrences.push({ ...o, title: ev.title || strand.title });
+    }
+    occurrences.sort((a, b) => a.date.localeCompare(b.date) || String(a.time_start || '').localeCompare(String(b.time_start || '')));
+    const upcomingHtml = occurrences.length ? occurrences.slice(0, 30).map(o => `
+        <div class="event">
+          <div class="event-title">${esc(o.title)}</div>
+          <div class="event-meta">${esc(prettyDate(o.date))}${!o.no_time && o.time_start ? ` · ${esc(o.time_start)}${o.time_end ? '–' + esc(o.time_end) : ''}` : ''}${o.note ? ` · ${esc(o.note)}` : ''}</div>
+        </div>`).join('') : '<p style="color:#8290C0;">Nothing scheduled in the next 90 days.</p>';
+
+    const events = (strand.events || []).slice(0, 60);
+    const eventsHtml = events.length ? events.map(ev => `
         <div class="event">
           <div class="event-title">${esc(ev.title || strand.title)}</div>
-          <div class="event-meta">${when || ''}${ev.time_start ? ` · ${esc(ev.time_start)}` : ''}${ev.price && ev.price !== 'free' ? ` · ${esc(ev.price)}` : ''}</div>
+          <div class="event-meta">${esc(describeSchedule(ev))}${ev.price && ev.price !== 'free' ? ` · ${esc(ev.price)}` : ''}</div>
           ${ev.notes ? `<div style="margin-top:6px;color:#C5CCEA;font-size:14px;">${esc(ev.notes)}</div>` : ''}
-        </div>`;
-    }).join('') : '<p style="color:#8290C0;">No events scheduled yet.</p>';
+        </div>`).join('') : '<p style="color:#8290C0;">No events scheduled yet.</p>';
 
     const jsonLd = JSON.stringify({
       '@context': 'https://schema.org',
@@ -252,21 +252,25 @@ router.get('/strand/:handle/:strandId', async (req, res, next) => {
         ${strand.subscriberCount ? ` · ${strand.subscriberCount} subscriber${strand.subscriberCount === 1 ? '' : 's'}` : ''}
       </div>
       ${strand.description ? `<p class="desc">${esc(strand.description)}</p>` : ''}
-      <h2>Upcoming events</h2>
+      <h2>Coming up</h2>
+      ${upcomingHtml}
+      <h2>Schedule</h2>
       ${eventsHtml}
       <div class="footer">
-        Get this strand in your inbox — <a href="${FRONTEND}/#/s/${esc(handle)}/${esc(strandId)}">subscribe on EventStrand</a>.
+        Keep this schedule in your own portal — <a href="${FRONTEND}/#/s/${esc(handle)}/${esc(strandId)}">subscribe on EventStrand</a>.
       </div>`;
 
     res.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=60, stale-if-error=86400');
-    res.send(shell({ canonical, title, description: desc, ogImage, jsonLd, bodyHtml }));
+    res.send(shell({ canonical, title, description: desc, ogImage, jsonLd, bodyHtml, noindex }));
   } catch (e) { next(e); }
 });
 
 // ── /ssr/braid/:handle/:braidId ───────────────────────────────
 router.get('/braid/:handle/:braidId', async (req, res, next) => {
   try {
-    const { handle, braidId } = req.params;
+    const handle = String(req.params.handle || '').toLowerCase();
+    const { braidId } = req.params;
+    if (!isId(braidId)) return res.status(404).send(notFoundPage('Braid not found'));
     const user = await User.findOne({
       $or: [{ handle }, { previousHandles: handle }]
     });
@@ -278,22 +282,28 @@ router.get('/braid/:handle/:braidId', async (req, res, next) => {
 
     const braid = await Braid.findOne({
       _id: braidId, publisher: user._id, published: true,
-    }).populate('strands', 'title venue subscriberCount color').lean();
+    }).populate({
+      path: 'strands', select: 'title venue subscriberCount color',
+      match: { published: true, visibility: { $ne: 'protected' } },
+    }).lean();
 
     if (!braid) return res.status(404).send(notFoundPage('Braid not found'));
 
     if (braid.visibility === 'protected') {
+      res.set('Cache-Control', 'no-store');
       return res.send(passcodeGatePage({
         canonical: `${FRONTEND}/b/${handle}/${braidId}`,
-        title: `${braid.title} — passcode required`,
+        openUrl:   `${FRONTEND}/#/b/${handle}/${braidId}`,
+        what:      'braid',
       }));
     }
+    const noindex = braid.visibility !== 'public';
 
     const canonical = `${FRONTEND}/b/${handle}/${braidId}`;
     const title     = `${braid.title} · @${handle} · EventStrand`;
     const desc      = metaDescription(braid.description || `${braid.title} — a curated bundle of strands by @${handle}.`);
 
-    const strands = braid.strands || [];
+    const strands = (braid.strands || []).filter(Boolean);
     const strandsHtml = strands.length ? strands.map(s => `
       <div class="event">
         <div class="event-title">${esc(s.title)}</div>
@@ -323,14 +333,14 @@ router.get('/braid/:handle/:braidId', async (req, res, next) => {
       </div>`;
 
     res.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=60, stale-if-error=86400');
-    res.send(shell({ canonical, title, description: desc, jsonLd, bodyHtml }));
+    res.send(shell({ canonical, title, description: desc, jsonLd, bodyHtml, noindex }));
   } catch (e) { next(e); }
 });
 
 // ── /ssr/profile/:handle ──────────────────────────────────────
 router.get('/profile/:handle', async (req, res, next) => {
   try {
-    const { handle } = req.params;
+    const handle = String(req.params.handle || '').toLowerCase();
     const user = await User.findOne({
       $or: [{ handle }, { previousHandles: handle }]
     });
@@ -384,18 +394,20 @@ router.get('/profile/:handle', async (req, res, next) => {
 function notFoundPage(message) {
   return shell({
     canonical: FRONTEND,
+    noindex: true,
     title: 'Not found · EventStrand',
     description: message,
     bodyHtml: `<h1>404</h1><p class="desc">${esc(message)}.</p><div class="footer"><a href="${FRONTEND}/">Back to EventStrand</a></div>`,
   });
 }
 
-function passcodeGatePage({ canonical, title }) {
+function passcodeGatePage({ canonical, openUrl, what }) {
   return shell({
     canonical,
-    title,
-    description: 'This strand requires a passcode to view.',
-    bodyHtml: `<h1>Passcode required</h1><p class="desc">This strand is protected. Open it on <a href="${esc(canonical)}#">EventStrand</a> and enter the passcode to view.</p>`,
+    noindex: true,
+    title: 'Passcode required · EventStrand',
+    description: `This ${what} requires a passcode to view.`,
+    bodyHtml: `<h1>Passcode required</h1><p class="desc">This ${what} is protected. <a href="${esc(openUrl)}">Open it on EventStrand</a> and enter the passcode to view.</p>`,
   });
 }
 

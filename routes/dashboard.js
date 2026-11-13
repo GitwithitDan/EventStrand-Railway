@@ -3,13 +3,16 @@ const router    = express.Router();
 const auth      = require('../middleware/auth');
 const Workspace = require('../models/Workspace');
 const { DateTime } = require('luxon');
-const { hasNoTime } = require('../lib/schedule');
+const { getOccurrences } = require('../lib/occurrences');
 
 // GET /api/dashboard/upcoming?workspaceId=xxx
 router.get('/upcoming', auth, async (req, res, next) => {
   try {
     const query = { user: req.user._id };
     if (req.query.workspaceId && req.query.workspaceId !== 'all') {
+      if (typeof req.query.workspaceId !== 'string' || !/^[0-9a-f]{24}$/i.test(req.query.workspaceId)) {
+        return res.status(400).json({ error: 'Invalid workspaceId' });
+      }
       query._id = req.query.workspaceId;
     }
 
@@ -19,7 +22,7 @@ router.get('/upcoming', auth, async (req, res, next) => {
       match: { published: true },
     });
 
-    const days   = Math.min(parseInt(req.query.days) || 60, 365);
+    const days   = Math.min(Math.max(parseInt(req.query.days, 10) || 60, 1), 365);
     const events = [];
     const seenStrands = new Set();
 
@@ -32,18 +35,22 @@ router.get('/upcoming', auth, async (req, res, next) => {
         // Use the strand's timezone for all date math. Falls back to
         // UTC if the strand has no timezone set, which keeps behaviour
         // deterministic regardless of where the server runs.
-        const tz = strand.timezone || 'UTC';
-        const from = DateTime.now().setZone(tz).startOf('day');
-        const to   = from.plus({ days });
+        let from = DateTime.now().setZone(strand.timezone || 'UTC').startOf('day');
+        if (!from.isValid) from = DateTime.now().setZone('UTC').startOf('day');
+        const tz = from.zoneName;
+        const to = from.plus({ days });
 
         for (const ev of strand.events || []) {
-          const upcoming = getUpcomingDates(ev, from, to, tz);
-          for (const { date, timeStart, noTime } of upcoming) {
+          // One engine for every consumer — see lib/occurrences.js.
+          for (const o of getOccurrences(ev, from.toISODate(), to.toISODate())) {
             events.push({
+              eventId:     ev._id,
               title:       ev.title || strand.title,
-              date:        date,
-              time:        timeStart || '',
-              noTime:      !!noTime,
+              date:        o.date,
+              time:        o.no_time ? '' : (o.time_start || ''),
+              timeEnd:     o.no_time ? '' : (o.time_end || ''),
+              noTime:      !!o.no_time,
+              note:        o.note || '',
               strandId:    strand._id,
               strandTitle: strand.title,
               venue:       strand.venue || '',
@@ -58,124 +65,9 @@ router.get('/upcoming', auth, async (req, res, next) => {
       }
     }
 
-    events.sort((a, b) => a.date > b.date ? 1 : -1);
+    events.sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time));
     res.json({ events: events.slice(0, 100) });
   } catch (e) { next(e); }
 });
-
-// ── RECURRENCE ENGINE ─────────────────────────────────────────
-// All date math happens in the strand's timezone via Luxon DateTime.
-// `from` and `to` are DateTime objects already pinned to that zone.
-// A single `date` and curated `dates` entries use plain ISO date strings (YYYY-MM-DD)
-// which are timezone-agnostic — they refer to a calendar date in
-// whatever zone the publisher set.
-function getUpcomingDates(ev, from, to, tz) {
-  const results = [];
-  const fromIso = from.toISODate();
-  const toIso   = to.toISODate();
-
-  // date, dates[] and recurrence[] may be combined freely — occurrences from
-  // all of them are merged, and a repeated calendar date is listed once.
-  const addOcc = (date, timeStart, noTime) => {
-    if (results.find(x => x.date === date)) return;
-    results.push({ date, timeStart: noTime ? '' : (timeStart || ''), noTime: !!noTime });
-  };
-
-  // A single date, on its own or alongside other schedule fields.
-  if (ev.date && ev.date >= fromIso && ev.date <= toIso) {
-    addOcc(ev.date, ev.time_start, hasNoTime(ev));
-  }
-
-  // Curated dates[] — the sole schedule for a "Date List" event, or extra
-  // dates coexisting with a date or recurrence[] (spec dates[]).
-  for (const entry of ev.dates || []) {
-    if (!entry.date) continue;
-    if (entry.date >= fromIso && entry.date <= toIso) {
-      addOcc(entry.date, entry.time_start, hasNoTime(entry));
-    }
-  }
-
-  // Recurring — walk through window day by day in the strand's timezone,
-  // checking every recurrence rule. Rules are additive per spec — a date
-  // matching ANY rule produces one occurrence for that date.
-  const rules = ev.recurrence || [];
-  if (!rules.length) return results;
-
-  const DOW_ABBR = ['mon','tue','wed','thu','fri','sat','sun'];
-  const MONTHS = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
-
-  let d = from;
-  let safety = 0;
-
-  while (d <= to && safety++ < 500) {
-    const dateStr = d.toISODate();
-    const dayAbbr = DOW_ABBR[d.weekday - 1];
-    let dayMatch = false;
-    let matchedNoTime = false;
-    let matchedTimeStart = '';
-
-    for (const rule of rules) {
-      let match = false;
-
-      if (rule.pattern === 'daily') match = true;
-      else if (rule.pattern === 'weekly') match = (rule.days || ['fri']).includes(dayAbbr);
-      else if (rule.pattern === 'monthly_week') {
-        // "first/second/third/fourth Monday of the month" semantics
-        const weekNum = Math.ceil(d.day / 7);
-        const lastDayOfMonth = d.endOf('month').day;
-        const lastWeek = Math.ceil(lastDayOfMonth / 7);
-        const weekMap = { first:1, second:2, third:3, fourth:4, last: lastWeek };
-        match = (rule.days || []).includes(dayAbbr) && weekMap[rule.month_week] === weekNum;
-      } else if (rule.pattern === 'monthly_date') {
-        match = d.day === (rule.month_date || 1);
-      } else if (rule.pattern === 'annual') {
-        if (rule.month_date) {
-          match = d.day === rule.month_date;
-        } else if (rule.days?.length) {
-          match = rule.days.includes(dayAbbr);
-        } else {
-          match = true;
-        }
-      }
-
-      // Season filter (months are inclusive: jan..dec)
-      if (match && (rule.season_start || rule.season_end)) {
-        const monthIdx = d.month - 1; // Luxon month is 1-based
-        const si = rule.season_start ? MONTHS.indexOf(rule.season_start) : 0;
-        const ei = rule.season_end   ? MONTHS.indexOf(rule.season_end)   : 11;
-        match = si <= ei
-          ? (monthIdx >= si && monthIdx <= ei)
-          : (monthIdx >= si || monthIdx <= ei); // wraps year-end (e.g. nov..feb)
-      }
-
-      // Rule-level active window
-      if (match && rule.start_date && dateStr < rule.start_date) match = false;
-      if (match && rule.end_date   && dateStr > rule.end_date)   match = false;
-
-      if (match) {
-        dayMatch = true;
-        matchedNoTime = hasNoTime(rule);
-        matchedTimeStart = matchedNoTime ? '' : (rule.time_start || '');
-        break; // first matching rule supplies the displayed time for this date
-      }
-    }
-
-    // Exception filter — event-level, applies regardless of which rule matched
-    if (dayMatch && ev.exceptions?.length) {
-      for (const exc of ev.exceptions) {
-        if (exc.type === 'skip' && exc.date === dateStr) { dayMatch = false; break; }
-        if (exc.type === 'cancelled_range' && exc.date <= dateStr && dateStr <= (exc.date_end || exc.date)) { dayMatch = false; break; }
-      }
-    }
-
-    if (dayMatch && !results.find(x => x.date === dateStr)) {
-      results.push({ date: dateStr, timeStart: matchedTimeStart, noTime: matchedNoTime });
-    }
-
-    d = d.plus({ days: 1 });
-  }
-
-  return results;
-}
 
 module.exports = router;

@@ -5,6 +5,18 @@ const Braid        = require('../models/Braid');
 const User         = require('../models/User');
 const Workspace    = require('../models/Workspace');
 const optionalAuth = require('../middleware/optionalAuth');
+const mongoose     = require('mongoose');
+const { DateTime } = require('luxon');
+const { checkPasscode } = require('../lib/access');
+const { viewUpdate }    = require('../lib/views');
+const { getOccurrences, describeSchedule } = require('../lib/occurrences');
+
+// Fields that belong to the publisher only and never leave through a public route.
+const PRIVATE_STRAND_FIELDS = '-accessCode -viewsHistory -viewsHistoryDay -scanOrigins -scanCount -lastViewedAt '
+  + '-directoryVerificationUrl -directoryLastError -directoryLastAttemptAt';
+
+const isId = v => typeof v === 'string' && mongoose.isValidObjectId(v);
+const handleParam = v => String(v || '').toLowerCase();
 
 // Escape user input for safe use in a MongoDB $regex query
 function escapeRegex(str) {
@@ -14,7 +26,9 @@ function escapeRegex(str) {
 // GET /api/public/strand/:handle/:strandId
 router.get('/strand/:handle/:strandId', optionalAuth, async (req, res, next) => {
   try {
-    const { handle, strandId } = req.params;
+    const handle = handleParam(req.params.handle);
+    const { strandId } = req.params;
+    if (!isId(strandId)) return res.status(404).json({ error: 'Strand not found' });
 
     // Resolve handle — check current + previous handles for redirect support
     const user = await User.findOne({
@@ -31,25 +45,17 @@ router.get('/strand/:handle/:strandId', optionalAuth, async (req, res, next) => 
       _id: strandId,
       publisher: user._id,
       published: true,
-    }).select('-accessCode');
+    });
 
     if (!strand) return res.status(404).json({ error: 'Strand not found' });
 
-    if (strand.visibility === 'protected') {
-      const passcode = req.query.passcode;
-      const strandWithCode = await Strand.findById(strandId).select('accessCode');
-      if (!passcode || passcode !== strandWithCode.accessCode) {
-        return res.status(403).json({ error: 'Passcode required' });
-      }
-    }
+    const denied = checkPasscode(req, strand);
+    if (denied) return res.status(denied.status).json({ error: denied.error, passcodeHeader: true });
 
-    // Increment view count (async, non-blocking)
-    // Rolling 30-day index: days since Unix epoch mod 30 (0–29)
-    const today = Math.floor(Date.now() / 86400000) % 30;
-    Strand.findByIdAndUpdate(strandId, {
-      $inc: { viewCount: 1, [`viewsHistory.${today}`]: 1 },
-      lastViewedAt: new Date(),
-    }).catch(() => {});
+    // Count the view (async, non-blocking). The publisher's own visits don't count.
+    if (!req.user || String(req.user._id) !== String(user._id)) {
+      Strand.updateOne({ _id: strandId }, viewUpdate(strand)).catch(() => {});
+    }
 
     // Track scan origin — only fires when ?src=qr is appended (by QR code URLs)
     const src = req.query.src;
@@ -76,15 +82,51 @@ router.get('/strand/:handle/:strandId', optionalAuth, async (req, res, next) => 
       subscribed = await Workspace.exists({ user: req.user._id, strands: strand._id });
     }
 
+    // What a visitor actually wants: the next dates, and each event's schedule
+    // in plain words. Computed here so every client shows the same answer.
+    const tz    = strand.timezone || 'UTC';
+    const start = DateTime.now().setZone(tz).isValid ? DateTime.now().setZone(tz) : DateTime.now().setZone('UTC');
+    const from  = start.toISODate();
+    const to    = start.plus({ days: 90 }).toISODate();
+    const upcoming = [];
+    const schedules = {};
+    for (const ev of strand.events || []) {
+      schedules[String(ev._id)] = describeSchedule(ev);
+      for (const o of getOccurrences(ev, from, to)) {
+        upcoming.push({
+          eventId:   ev._id,
+          title:     ev.title,
+          date:      o.date,
+          timeStart: o.no_time ? '' : (o.time_start || ''),
+          timeEnd:   o.no_time ? '' : (o.time_end || ''),
+          noTime:    !!o.no_time,
+          note:      o.note || '',
+          modified:  !!o.modified,
+        });
+      }
+    }
+    upcoming.sort((a, b) => a.date.localeCompare(b.date) || a.timeStart.localeCompare(b.timeStart));
+
+    const out = strand.toObject();
+    for (const f of PRIVATE_STRAND_FIELDS.split(' ')) delete out[f.slice(1)];
+
     res.set('Cache-Control', 'no-store');
-    res.json({ strand, publisherHandle: user.handle, subscribed: !!subscribed });
+    res.json({
+      strand: out,
+      publisherHandle: user.handle,
+      subscribed: !!subscribed,
+      upcoming: upcoming.slice(0, 60),
+      schedules,
+    });
   } catch (e) { next(e); }
 });
 
 // GET /api/public/braid/:handle/:braidId
 router.get('/braid/:handle/:braidId', async (req, res, next) => {
   try {
-    const { handle, braidId } = req.params;
+    const handle = handleParam(req.params.handle);
+    const { braidId } = req.params;
+    if (!isId(braidId)) return res.status(404).json({ error: 'Braid not found' });
 
     const user = await User.findOne({
       $or: [{ handle }, { previousHandles: handle }]
@@ -99,16 +141,18 @@ router.get('/braid/:handle/:braidId', async (req, res, next) => {
       _id: braidId,
       publisher: user._id,
       published: true,
-    }).populate('strands', 'title venue publisherHandle events color subscriberCount');
+    }).populate({
+      // A braid only ever shows strands that are themselves open to read:
+      // published, and not behind their own passcode.
+      path:   'strands',
+      select: 'title venue publisherHandle events color subscriberCount',
+      match:  { published: true, visibility: { $ne: 'protected' } },
+    });
 
     if (!braid) return res.status(404).json({ error: 'Braid not found' });
 
-    if (braid.visibility === 'protected') {
-      const braidWithCode = await Braid.findById(braidId).select('accessCode');
-      if (req.query.passcode !== braidWithCode.accessCode) {
-        return res.status(403).json({ error: 'Passcode required' });
-      }
-    }
+    const denied = checkPasscode(req, braid);
+    if (denied) return res.status(denied.status).json({ error: denied.error, passcodeHeader: true });
 
     Braid.findByIdAndUpdate(braidId, { $inc: { viewCount: 1 } }).catch(() => {});
 
@@ -128,15 +172,21 @@ router.get('/braid/:handle/:braidId', async (req, res, next) => {
       }
     }
 
+    const braidOut = braid.toObject();
+    delete braidOut.accessCode;
+    delete braidOut.scanOrigins;
+    delete braidOut.scanCount;
+    braidOut.strands = (braidOut.strands || []).filter(Boolean);
+
     res.set('Cache-Control', 'no-store');
-    res.json({ braid: { ...braid.toObject(), publisherHandle: user.handle } });
+    res.json({ braid: { ...braidOut, publisherHandle: user.handle } });
   } catch (e) { next(e); }
 });
 
 // GET /api/public/profile/:handle
 router.get('/profile/:handle', async (req, res, next) => {
   try {
-    const { handle } = req.params;
+    const handle = handleParam(req.params.handle);
 
     const user = await User.findOne({
       $or: [{ handle }, { previousHandles: handle }]
@@ -175,7 +225,7 @@ router.get('/profile/:handle', async (req, res, next) => {
 // GET /api/public/strands/search?q=xxx
 router.get('/strands/search', async (req, res, next) => {
   try {
-    const q = req.query.q?.trim();
+    const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 80) : '';
     if (!q || q.length < 2) return res.json({ strands: [] });
 
     const safe = escapeRegex(q);

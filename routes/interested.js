@@ -28,12 +28,17 @@ router.get('/interested', auth, async (req, res, next) => {
 router.post('/interested', auth, async (req, res, next) => {
   try {
     const { key, eventId, date, time, title, venue, strand, expiresAt } = req.body;
-    if (!key || !expiresAt) return res.status(400).json({ error: 'key and expiresAt required' });
+    if (typeof key !== 'string' || !key || key.length > 200 || !expiresAt) {
+      return res.status(400).json({ error: 'key and expiresAt required' });
+    }
+    const when = new Date(expiresAt);
+    if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid expiresAt' });
+    const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
 
     await Interested.findOneAndUpdate(
       { user: req.user._id, key },
-      { user: req.user._id, key, eventId, date, time, title, venue, strand,
-        expiresAt: new Date(expiresAt) },
+      { user: req.user._id, key, eventId: str(eventId, 64), date: str(date, 10), time: str(time, 8),
+        title: str(title, 200), venue: str(venue, 200), strand: str(strand, 200), expiresAt: when },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
     res.json({ ok: true });
@@ -55,7 +60,7 @@ router.post('/interested/clear-expired', auth, async (req, res, next) => {
 // DELETE /api/user/interested/:key — remove one entry
 router.delete('/interested/:key', auth, async (req, res, next) => {
   try {
-    await Interested.deleteOne({ user: req.user._id, key: req.params.key });
+    await Interested.deleteOne({ user: req.user._id, key: String(req.params.key) });
     res.json({ ok: true });
   } catch (e) { next(e); }
 });

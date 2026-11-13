@@ -6,6 +6,7 @@ const Workspace  = require('../models/Workspace');
 const Notification = require('../models/Notification');
 const { validate, schemas } = require('../lib/validators');
 const { normaliseSchedule } = require('../lib/schedule');
+const { last30 } = require('../lib/views');
 
 // Notify all subscribers of a strand update
 async function notifySubscribers(strandId, strandTitle, message) {
@@ -55,6 +56,7 @@ router.post('/', auth, validate(schemas.strandCreate), async (req, res, next) =>
       type:            meta.type,
       venue:           locStr(meta.location, 'venue'),
       address:         locStr(meta.location, 'address'),
+      city:            cityOf(meta),
       timezone:        meta.timezone,
       color:           meta.color,
       website:         meta.website,
@@ -75,51 +77,57 @@ router.put('/:id', auth, validate(schemas.strandUpdate), async (req, res, next) 
 
     const { meta, events, visibility, accessCode } = req.body;
     if (meta) {
-      if (meta.title)       strand.title       = meta.title;
-      if (meta.description) strand.description = meta.description;
-      if (meta.type)        strand.type        = meta.type;
-      if (meta.location) {
+      // A field that is sent is applied, including an empty value that clears it.
+      // The title is the one field that can never be emptied.
+      if (meta.title)                     strand.title       = meta.title;
+      if (meta.description !== undefined) strand.description = meta.description;
+      if (meta.type)                      strand.type        = meta.type;
+      if (meta.location !== undefined) {
         strand.venue   = locStr(meta.location, 'venue');
         strand.address = locStr(meta.location, 'address');
+        if (locCity(meta.location)) strand.city = locCity(meta.location);
       }
-      if (meta.timezone)    strand.timezone    = meta.timezone;
-      if (meta.color)       strand.color       = meta.color;
-      if (meta.website)     strand.website     = meta.website;
+      if (cityOf(meta)) strand.city = cityOf(meta);
+      if (meta.timezone)                  strand.timezone    = meta.timezone;
+      if (meta.color)                     strand.color       = meta.color;
+      if (meta.website !== undefined)     strand.website     = meta.website;
       if (meta.visibility)  strand.visibility  = meta.visibility;
       if (meta.access_code) strand.accessCode  = meta.access_code;
     }
     if (visibility)              strand.visibility = visibility;
     if (accessCode !== undefined) strand.accessCode = accessCode;
 
-    // B-10: Track whether events meaningfully changed before overwriting them.
-    // Capture the current event _id set so we can diff after the update.
-    // "Meaningful change" = an event was added (new _id) or the count changed.
-    // Meta-only saves (title, description, color, etc.) must NOT notify subscribers.
+    // Subscribers are told about a save only when what they would see changed:
+    // an event was added or removed, or a title, date, time, rule or exception
+    // differs. Wording, colour and other meta-only edits stay silent.
     let eventsChanged = false;
     if (events) {
-      const prevIds   = new Set(strand.events.map(e => e._id.toString()));
-      const prevCount = strand.events.length;
+      const before = strand.events.map(e => scheduleSig(e.toObject())).sort();
 
-      // B-16: Fix title-dedup silently losing the first of two same-titled events.
-      // Build the title fallback Map from the END of the array so the last entry
-      // wins on a duplicate, but use _id matching (more reliable) as the primary key.
-      const existingById    = new Map(strand.events.map(e => [e._id.toString(), e]));
-      // Reverse-iterate so the first occurrence wins the Map slot
-      const existingByTitle = new Map(
-        [...strand.events].reverse().map(e => [e.title?.toLowerCase(), e])
-      );
-
-      strand.events = events.map(e => {
-        const prev = (e._id && existingById.get(e._id.toString()))
-                  || existingByTitle.get(e.title?.toLowerCase());
-        return normaliseEvent(e, prev?.views ?? 0, prev);
+      // Match each incoming event to the stored one it replaces — by _id, then
+      // by its stable spec id, then by title — so it keeps its _id and view count.
+      const taken = new Set();
+      const claim = prev => { if (!prev || taken.has(prev)) return null; taken.add(prev); return prev; };
+      const byId    = new Map(strand.events.map(e => [e._id.toString(), e]));
+      const bySpec  = new Map(); const byTitle = new Map();
+      strand.events.forEach(e => {
+        if (e.spec_id && !bySpec.has(e.spec_id)) bySpec.set(e.spec_id, e);
+        const k = e.title?.toLowerCase();
+        if (k && !byTitle.has(k)) byTitle.set(k, e);
       });
-      strand.events = assignSpecIds(strand.events);
 
-      // A new event is one that supplied no _id or supplied an _id we don't recognise
-      const newCount = strand.events.length;
-      eventsChanged  = newCount !== prevCount
-                    || events.some(e => !e._id || !prevIds.has(e._id.toString()));
+      const next = events.map(e => {
+        const prev = claim(e._id && byId.get(String(e._id)))
+                  || claim(e.spec_id && bySpec.get(e.spec_id))
+                  || claim(byTitle.get(e.title?.toLowerCase()));
+        const out = normaliseEvent(e, prev?.views ?? 0, prev);
+        if (prev) out._id = prev._id;
+        return out;
+      });
+      strand.events = assignSpecIds(next);
+
+      const after = strand.events.map(e => scheduleSig(e.toObject())).sort();
+      eventsChanged = before.length !== after.length || before.some((s, i) => s !== after[i]);
     }
 
     await strand.save();
@@ -183,9 +191,9 @@ router.get('/:id/analytics', auth, async (req, res, next) => {
       title:           strand.title,
       subscriberCount: strand.subscriberCount,
       totalViews:      strand.viewCount,
-      viewsThisMonth:  strand.viewsHistory.slice(-30).reduce((a, b) => a + b, 0),
+      viewsThisMonth:  last30(strand).reduce((a, b) => a + b, 0),
       scanCount:       strand.scanCount,
-      viewsLast30:     strand.viewsHistory.slice(-30),
+      viewsLast30:     last30(strand), // oldest first, ending today
       topScanOrigins:  strand.scanOrigins.slice(0, 5).map(o => ({
         label: o.label,
         count: o.count,
@@ -226,6 +234,30 @@ function locStr(loc, kind) {
   const o = loc;
   if (kind === 'venue') return o.name || o.address || undefined;
   return [o.address, o.city, o.state, o.country].filter(Boolean).join(', ') || o.name || undefined;
+}
+
+function locCity(loc) {
+  if (!loc || typeof loc !== 'object' || typeof loc.city !== 'string') return undefined;
+  return loc.city.trim().slice(0, 120) || undefined;
+}
+
+// The city arrives either inside a location object or as meta.city.
+function cityOf(meta) {
+  if (meta && typeof meta.city === 'string' && meta.city.trim()) return meta.city.trim().slice(0, 120);
+  return locCity(meta && meta.location);
+}
+
+// What a subscriber can see of an event's schedule, as a comparable string.
+function scheduleSig(ev) {
+  const t = o => [o.time_start || '', o.time_end || '', !!(o.no_time || o.all_day)];
+  const pick = (o, keys) => keys.map(k => (o[k] === undefined || o[k] === null ? '' : o[k]));
+  return JSON.stringify([
+    ev.title || '', ev.date || '', t(ev),
+    (ev.dates || []).map(d => [d.date, t(d), d.note || '']),
+    (ev.recurrence || []).map(r => [pick(r, ['pattern', 'every', 'month_week', 'month_date', 'season_start', 'season_end',
+      'season_start_day', 'season_end_day', 'start_date', 'end_date']), (r.days || []).join(','), t(r)]),
+    (ev.exceptions || []).map(x => pick(x, ['type', 'date', 'date_end', 'time_start', 'time_end', 'note'])),
+  ]);
 }
 
 function normaliseEvent(e, existingViews, prev) {
